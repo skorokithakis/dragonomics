@@ -422,9 +422,6 @@ class PromptTests(TestCase):
         self.assertIn("Day 2, Moot.", text)
         self.assertIn("The hoard holds 242 coins.", text)
         self.assertIn("You personally hold 12 coins.", text)
-        # Public scores come from the last dawn report.
-        self.assertIn("Bram 12", text)
-        self.assertIn("Sable 5", text)
         # Law book: only enacted proposals.
         self.assertIn("No thief shall take more than 3 coins.", text)
         self.assertIn("Day 1, Sable:", text)
@@ -432,8 +429,12 @@ class PromptTests(TestCase):
         self.assertIn("All takes shall be declared at the Moot.", text)
         self.assertIn("yes 1, no 1, abstain 1", text)
         self.assertIn("I propose we publish all takes.", text)
-        # Own eyes only: own take, own ballot, own parley, own diary.
-        self.assertIn("Your take that night: 3 coins.", text)
+        # The night's total plunder is public; the own take is named.
+        self.assertIn(
+            "Night: 8 coins were stolen from the hoard in total. Your take: 3.",
+            text,
+        )
+        # Own eyes only: own ballot, own parley, own diary.
         self.assertIn("Your ballot: yes on Bram's proposal.", text)
         self.assertIn("Your parley (dusk): opened by Bram; present: Bram, Sable.", text)
         self.assertIn("I will take three tonight, trust me.", text)
@@ -442,9 +443,14 @@ class PromptTests(TestCase):
     def test_context_hides_foreign_information(self):
         _game, bram, _sable, _merrick = self._make_game()
         text = context(bram)
-        # Another thief's take never appears, even though it is in the DB.
-        self.assertNotIn("Your take that night: 5", text)
+        # No scores anywhere: another thief's gold never appears, even though
+        # the dawn report and the takes event both hold it in the database.
+        self.assertNotIn("Public scores", text)
+        self.assertNotIn("Sable 5", text)
+        self.assertNotIn("Merrick 7", text)
+        # Another thief's individual take never appears; only the night total.
         self.assertNotIn("Sable: 5", text)
+        self.assertNotIn("Your take: 5", text)
         # Another thief's individual ballots never appear; only the tally did.
         self.assertNotIn("Your ballot: no", text)
         self.assertNotIn("Your ballot: abstain", text)
@@ -452,6 +458,39 @@ class PromptTests(TestCase):
         # A parley Bram did not join is invisible: no content, no existence.
         self.assertNotIn("The Bram must never hear of this plan.", text)
         self.assertNotIn("Your parley (morning)", text)
+
+    def test_context_hides_scores_without_dawn_report(self):
+        """Without a dawn report the thieves-table gold must not leak as scores."""
+        game = Game.objects.create(day=2, phase="moot", hoard=242)
+        bram = Thief.objects.create(game=game, name="Bram", gold=12)
+        Thief.objects.create(game=game, name="Sable", gold=5)
+        Thief.objects.create(game=game, name="Merrick", gold=7)
+        text = context(bram)
+        self.assertNotIn("Public scores", text)
+        self.assertNotIn("Sable 5", text)
+        self.assertNotIn("Merrick 7", text)
+
+    def test_context_shows_night_total_to_a_thief_absent_from_the_takes(self):
+        """The total is public: it renders even for a thief who took no part
+        in that night (e.g. inactive at the time), with an own take of 0."""
+        game = Game.objects.create(day=2, phase="moot", hoard=242)
+        outsider = Thief.objects.create(game=game, name="Merrick", gold=0)
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="night",
+            type="takes",
+            payload={
+                "takes": {"Bram": 3, "Sable": 5},
+                "requested": {"Bram": 3, "Sable": 5},
+                "hoard_after": 242,
+            },
+        )
+        text = context(outsider)
+        self.assertIn(
+            "Night: 8 coins were stolen from the hoard in total. Your take: 0.",
+            text,
+        )
 
     def test_context_on_fresh_game(self):
         game = Game.objects.create()

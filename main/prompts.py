@@ -70,11 +70,12 @@ def context(thief):
     """Assemble the per-call preamble for ``thief`` from the database.
 
     Returns a plain string; beats append their specific question to it.
-    Visibility follows the information physics: the dawn report, proposals
-    with their public tallies, and the public debate are shown to everyone;
-    the thief's own parleys, ballots, takes, and diary are shown only to the
-    thief. Another thief's takes, another thief's individual ballots, and
-    parleys the thief did not join never appear.
+    Visibility follows the information physics: the dawn report (hoard and
+    enacted law, but never individual scores), proposals with their public
+    tallies, and the public debate are shown to everyone; the thief's own
+    parleys, ballots, takes, and diary are shown only to the thief. Another
+    thief's takes, another thief's individual ballots, and parleys the thief
+    did not join never appear.
     """
     game = thief.game
     lines = [
@@ -82,14 +83,6 @@ def context(thief):
         f"The hoard holds {game.hoard} coins.",
         f"You personally hold {thief.gold} coins.",
     ]
-
-    report = Event.objects.filter(game=game, type="dawn_report").order_by("-pk").first()
-    if report is not None:
-        scores = report.payload.get("scores", {})
-    else:
-        scores = {t.name: t.gold for t in game.thieves.all()}
-    score_line = ", ".join(f"{name} {gold}" for name, gold in scores.items())
-    lines.append(f"Public scores (as published at the last dawn): {score_line}.")
 
     laws = list(Proposal.objects.filter(game=game, status="law").order_by("day", "pk"))
     if laws:
@@ -104,10 +97,7 @@ def context(thief):
         day_lines = []
         for event in Event.objects.filter(game=game, day=day, type="dawn_report"):
             payload = event.payload
-            scores = ", ".join(
-                f"{name} {gold}" for name, gold in payload.get("scores", {}).items()
-            )
-            line = f"Dawn report: hoard {payload.get('hoard')}; scores: {scores}."
+            line = f"Dawn report: hoard {payload.get('hoard')}."
             law = payload.get("law")
             if law:
                 line += f" Law now in force: {law['author']}: {law['text']}."
@@ -161,9 +151,15 @@ def context(thief):
                 for message in parley.messages.order_by("round", "order")
             )
         for event in Event.objects.filter(game=game, day=day, type="takes"):
-            own_take = event.payload.get("takes", {}).get(thief.name)
-            if own_take is not None:
-                day_lines.append(f"Your take that night: {own_take} coins.")
+            takes = event.payload.get("takes", {})
+            # The total is public knowledge, so it renders even for a thief
+            # who was not part of that night (e.g. inactive at the time).
+            total = sum(takes.values())
+            own_take = takes.get(thief.name, 0)
+            day_lines.append(
+                f"Night: {total} coins were stolen from the hoard in total. "
+                f"Your take: {own_take}."
+            )
         if day_lines:
             any_recent = True
             lines.append(f"--- Day {day}: what you saw ---")

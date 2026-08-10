@@ -31,9 +31,9 @@ from the next dawn.
 
 THE DAY - SIX BEATS (immutable: no law can change this order)
 
-1. Dawn. The hoard level and every thief's score are published. Laws passed
-   at yesterday's Moot take effect. From day {SURE_DAYS + 1} onward, the
-   end-of-game die is rolled here.
+1. Dawn. The hoard level and the night's total plunder are published. Laws
+   passed at yesterday's Moot take effect. From day {SURE_DAYS + 1} onward,
+   the end-of-game die is rolled here.
 2. Morning parley window. Private meetings.
 3. Moot. Proposals, seconds, the floor lottery, three debate rounds,
    ballots.
@@ -90,6 +90,31 @@ THE MOOT (legislation)
 - Repeal and amendment are ordinary proposals: they compete for the same
    one-law-per-day slot as anything else.
 
+THE LAW'S REACH (what an enacted law can and cannot do)
+
+- A law binds by itself: once enacted it is code, and it runs without any
+   thief lifting a finger. It executes to the letter of the proposal, not
+   its intent - a loophole left in the text is a loophole in the law.
+- A law reads the true record of the game: the hoard, every thief's gold,
+   and every thief's actual nightly takes. The law sees the night even
+   though thieves do not.
+- A law can move gold (every transfer is logged), post announcements to
+   the public dawn report, and keep its own records in the village ledger:
+   funds, vaults, offices, debts, prisons. A law can remove a thief from
+   the game (death, exile, prison), and a later law can bring them back.
+- A law binds the acts that exist. It can cap, tax, or punish the night
+   take, and it can give words spoken at the public Moot mechanical
+   effect: oaths, pledges, deposits, confessions, and contracts become
+   real verbs this way. Moot speech is the only act a law can demand of a
+   thief. A law that requires an act outside these - an offering at dawn,
+   a signature, an errand - is a dead letter: nobody can comply, nothing
+   happens.
+- A law does not read parleys. Intercepting a parley's words, or
+   revealing that a meeting happened at all, are distinct powers that a
+   law must claim openly in its own text to use.
+- No law can change the six beats, the hoard and wake physics, the
+   end-of-game rule, or anything in the VOTING section below.
+
 VOTING (immutable and exact - no law can gate, weight, or remove a vote)
 
 - Every active thief may cast one ballot per floor proposal: yes, no, or
@@ -116,16 +141,19 @@ PARLEYS (private meetings)
 
 INFORMATION PHYSICS - WHAT YOU SEE AND WHAT YOU DO NOT
 
-- Night takes are private: nobody learns how much you take. Scores and the
-   hoard level are public at dawn. Since regrowth is a known formula, the
-   village can always compute how much was stolen in total each night -
-   never by whom.
+- Night takes are private: nobody learns how much you take. So is gold:
+   you always know your own, and never anyone else's. The full ranking is
+   revealed only when the run ends. Like all privacy here, this is the
+   default in a lawless village - a law can publish what it can see.
+- The dawn report publishes the hoard level and the total stolen during
+   the night - never by whom. Every dawn the village knows the exact size
+   of its crime problem, and nothing about its authors.
 - Ballots are secret: only the tally is public. Individual ballots are
    visible only to the thief who cast them, unless a law says otherwise.
 - Parleys are visible only to their participants.
 - You always see the dawn report, the public Moot debate, proposals, and
-   their tallies. You never see another thief's takes, another thief's
-   ballots, or a parley you were not in."""
+   their tallies. You never see another thief's gold, another thief's
+   takes, another thief's ballots, or a parley you were not in."""
 
 # The statute book opens blank; these are teaching material only (see the
 # spec's "The statute book" section). system_prompt marks them as

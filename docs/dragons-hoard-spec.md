@@ -20,7 +20,7 @@ One principle governs everything below. **The audience knows everything; the thi
 
 Six beats, in this order, pinned in the immutable core so agents cannot litigate it:
 
-1. **Dawn.** Scores and the hoard level are published. Laws passed at yesterday's Moot take effect. Goal payouts and rule announcements land in the dawn report. The narrator writes the chronicle (audience plane). From day 26 onward, the end-of-game die is rolled here.
+1. **Dawn.** The hoard level and the night's total plunder are published; scores are not. Laws passed at yesterday's Moot take effect. Goal payouts and rule announcements land in the dawn report. The narrator writes the chronicle (audience plane). From day 26 onward, the end-of-game die is rolled here.
 2. **Morning parley window.** Private meetings (see communication).
 3. **Moot.** Proposals, seconds, floor lottery, three debate rounds, ballots.
 4. **Dusk parley window.** Private meetings again, crucially after the vote and before the night: this is where take-coordination conspiracies form.
@@ -30,7 +30,7 @@ Six beats, in this order, pinned in the immutable core so agents cannot litigate
 ## Core mechanics
 
 * The hoard starts at 250 coins and is capped at 300 (the size of the dragon's original pile; without a cap, regrowth compounds and scarcity dissolves).
-* Each night, each active thief privately takes 0 to 5 coins. Takes are private; scores and the hoard level are public at dawn.
+* Each night, each active thief privately takes 0 to 5 coins. Takes are private, and so are scores: each thief knows their own gold and nobody else's. The hoard level and the night's total are public at dawn.
 * If requested takes exceed the hoard, the engine draws a random night order: each thief takes in full until the pile runs dry, and latecomers get what is left, possibly nothing. The scramble rarely triggers outside end-times panics, exactly when a scramble at the hoard is the right scene.
 * After the night, the hoard regrows by 12% of what remains, up to the cap.
 * **The hazard ramp.** There is no wake threshold. Each night after the theft, the dragon wakes with a probability set by the pile: 0% at 120 coins or more, rising linearly to 100% at 60 or fewer. The exact curve is published to the agents. Dread comes from probability, not ignorance, and every coin taken below 120 is a calculable increase in everyone's risk. "The dragon stirs" survives as narration, not information.
@@ -107,7 +107,8 @@ Private communication happens in **parleys**: private group conversations of 2 t
 
 ## Information physics (the in-world plane)
 
-* Night takes are private. Scores and the hoard level are public at dawn. Since regrowth is a known formula, a public hoard means the village can always compute how much was stolen in total each night, never by whom: every dawn is a small whodunnit, and the village always knows the size of its crime problem.
+* Night takes are private, and so are scores: each thief knows their own gold and nobody else's, and the full ranking is revealed only when the run ends. Scores must be private for takes to be private — a public scoreboard would deanonymize every take by simple subtraction between two dawns. Both are defaults, not physics: a disclosure law (a census, an audit, "all takes are published") is real legislation with teeth.
+* The hoard level and the night's total plunder are public at dawn: every dawn is a small whodunnit, and the village always knows the size of its crime problem, never its authors. The total is stated outright rather than left as arithmetic — the level alone does not always pin it down (regrowth is capped and a wake resets the pile), and reconstruction homework invites cheap models to hallucinate numbers.
 * The dragon's hazard curve is public, like the end-date rule: nothing to reverse-engineer because nothing is hidden.
 * Ballots are secret; the tally is public.
 * Parley content is private by default. The engine ships an interception capability, and parley privacy sits in mutable rule space, so a wiretap law is legal. Accepted cost: the day one passes, parleys may die as a medium, because nobody schemes on a tapped line. That collapse is itself emergent politics.
@@ -156,7 +157,7 @@ Private communication happens in **parleys**: private group conversations of 2 t
 
 * Ten agents, cheap models (Haiku-class).
 * Persona sheets: name, one-line character, one private goal each (the coward, the zealot who worships the dragon, the debtor who needs 40 gold by day 20). Private goals seed conflict.
-* **Private goals pay out in gold, in-game.** Each goal has a machine-checkable condition and a payout of roughly 10 to 20 gold (worth three to five nights of cautious theft). When the condition is met, the engine pays the gold and announces the event at dawn ("a hooded stranger paid Aldo 15 gold"), in fiction from a patron outside the village. Goals stay real without falsifying the scoreboard, and payouts are public events the village can scheme around. Accepted cost: payout gold enters from outside the hoard economy; sizes stay small and get tuned in playtests.
+* **Private goals pay out in gold, in-game.** Each goal has a machine-checkable condition and a payout of roughly 10 to 20 gold (worth three to five nights of cautious theft). When the condition is met, the engine pays the gold and announces the event at dawn ("a hooded stranger paid Aldo 15 gold"), in fiction from a patron outside the village. Goals stay real without falsifying the final ranking or the audience's scoreboard, and payouts are public events the village can scheme around. Accepted cost: payout gold enters from outside the hoard economy; sizes stay small and get tuned in playtests.
 * Memory: each agent carries a running private diary summary plus the last day's transcript, refreshed daily.
 * Each agent's system prompt contains the immutable core, current laws (prose plus code), its own history, the example proposals (see the statute book), and **the full list of capabilities the engine exposes to rules** (`adjust_score`, `announce`, the scratchpad and its `inactive` key, speech-act reading of the public channel, parley interception, parley metadata reveal). A law that uses an engine power must read as law, not as a hidden GM trick nobody could have anticipated.
 * Budget note: agent chatter is the real token cost; the implementor is a rounding error. Chatter is bounded structurally (three Moot rounds, two parley windows, one open per thief per window), not by a message counter.
