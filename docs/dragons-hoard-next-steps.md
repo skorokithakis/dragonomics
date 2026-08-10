@@ -4,7 +4,7 @@ Date: 2026-08-09. Handoff note for the next working session.
 
 ## Where things stand
 
-The game design is complete. `design/dragons-hoard-spec.md` (draft 2) is the single canonical reference: every phase, channel, capability, and the win condition are pinned. `design/dragons-hoard-decisions.md` records all 14 decision sets with reasoning and simulation evidence; consult it when a spec choice needs its "why". `design/dragons-hoard-draft-1.md` is the original draft, kept for history. Two simulation scripts are saved alongside: `design/sim-threshold.py` (the original fixed-threshold sweep) and `design/sim-hazard.py` (the Monte Carlo for the hazard ramp; its results are in decisions section 7).
+The game design is complete. `docs/dragons-hoard-spec.md` (draft 2) is the single canonical reference: every phase, channel, capability, and the win condition are pinned. `docs/dragons-hoard-decisions.md` records all 14 decision sets with reasoning and simulation evidence; consult it when a spec choice needs its "why". `docs/dragons-hoard-draft-1.md` is the original draft, kept for history. Two simulation scripts are saved alongside: `sim-threshold.py` (the original fixed-threshold sweep) and `sim-hazard.py` (the Monte Carlo for the hazard ramp; its results are in decisions section 7).
 
 What remains is content and engineering, not game design. In order:
 

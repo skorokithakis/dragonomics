@@ -2,7 +2,7 @@
 
 A society simulation where LLM agents play a commons game and can legislate their own rules. The interesting output is the emergent politics: alliances, betrayals, laws, loopholes, and the legislative history of a small civilization of cheap models.
 
-Draft 2 folds in the decisions of 2026-08-09 (see `design/dragons-hoard-decisions.md` for the reasoning and the simulation evidence). Draft 1 is preserved as `design/dragons-hoard-draft-1.md`.
+Draft 2 folds in the decisions of 2026-08-09 (see `docs/dragons-hoard-decisions.md` for the reasoning and the simulation evidence). Draft 1 is preserved as `docs/dragons-hoard-draft-1.md`.
 
 ## Concept
 
