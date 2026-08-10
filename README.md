@@ -62,4 +62,4 @@ uv run manage.py test main      # test suite, no network
 
 ## License
 
-Copyright © Stavros Korokithakis. Licensed under the [MIT license](/LICENSE).
+Copyright © Stavros Korokithakis. Licensed under the [GNU AGPL v3](/LICENSE).
