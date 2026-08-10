@@ -402,9 +402,10 @@ def _run_parley(game: Game, parley: Parley) -> None:
     """Run one parley: N participants, at most N rounds.
 
     Each round visits every participant once, in random order, and each
-    speaks one message or passes; a fully silent round ends the parley
-    early. The event log gets the parley metadata and its full transcript
-    (the audience sees everything; privacy is enforced only in prompts).
+    speaks one message or passes; a round with at most one non-pass
+    message ends the parley early. The event log gets the parley metadata
+    and its full transcript (the audience sees everything; privacy is
+    enforced only in prompts).
     """
     participants = list(parley.participants.all())
     for round_no in range(1, len(participants) + 1):
@@ -412,8 +413,8 @@ def _run_parley(game: Game, parley: Parley) -> None:
         _rng.shuffle(order)
         for index, thief in enumerate(order):
             _parley_speak(game, parley, thief, round_no, index)
-        if not parley.messages.filter(round=round_no).exclude(text="").exists():
-            break  # a full round of silence ends the parley
+        if parley.messages.filter(round=round_no).exclude(text="").count() <= 1:
+            break  # at most one voice in a round ends the parley
     _log(
         game,
         game.phase,
@@ -453,7 +454,9 @@ def _parley_speak(game: Game, parley: Parley, thief, round_no: int, order: int) 
             system_prompt(thief),
             f"{context(thief)}\n\nPARLEY TRANSCRIPT SO FAR:\n{transcript}\n\n"
             f"It is your turn in this {parley.window} parley, opened by "
-            f"{parley.opener.name}. Say one thing, or pass.",
+            f"{parley.opener.name}. Say one thing, or pass. Pass if you "
+            f"have nothing new to add; repeating yourself wastes the "
+            f"parley.",
             '{"speak": true, "text": "your message"}',
             game=game,
             thief=thief,

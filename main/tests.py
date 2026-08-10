@@ -801,6 +801,33 @@ class AgentParleyTests(TestCase):
         )
         self.assertEqual(LlmCall.objects.filter(purpose="parley_speak").count(), 3)
 
+    def test_round_with_one_speaker_ends_the_parley_early(self):
+        # Round 1 has two speakers, so the parley continues; round 2 has
+        # exactly one speaker talking to two silent thieves, which ends it.
+        self.fake.responses = [
+            '{"open": true, "invitees": ["Sable", "Merrick"]}',
+            '{"open": false}',
+            '{"open": false}',
+            '{"open": false}',
+            '{"speak": true, "text": "Trust me."}',
+            '{"speak": true, "text": "Trust no one."}',
+            '{"speak": false}',
+            '{"speak": true, "text": "Last word."}',
+            '{"speak": false}',
+            '{"speak": false}',
+        ]
+        self._beat()
+        parley = Parley.objects.get()
+        messages = list(parley.messages.order_by("round", "order"))
+        self.assertEqual(len(messages), 6)  # rounds 1 and 2 only, no round 3
+        self.assertEqual({m.round for m in messages}, {1, 2})
+        # Round 1 had two non-pass messages (parley continued); round 2 one.
+        self.assertEqual(len([m for m in messages if m.round == 1 and m.text]), 2)
+        self.assertEqual(len([m for m in messages if m.round == 2 and m.text]), 1)
+        event = self.game.events.get(type="parley")
+        self.assertEqual(len(event.payload["transcript"]), 6)
+        self.assertEqual(LlmCall.objects.filter(purpose="parley_speak").count(), 6)
+
     def test_scheduling_failure_twice_opens_nothing(self):
         self.fake.responses = ["not json", "still not json"]  # Bram fails twice
         self.fake.responses += [
@@ -862,13 +889,15 @@ class AgentParleyTests(TestCase):
         self._beat()  # must not raise
         parley = Parley.objects.get()
         messages = list(parley.messages.order_by("round", "order"))
-        self.assertEqual(len(messages), 4)  # 2 participants, 2 rounds
+        # Sable is the only speaker in round 1, so the parley ends there.
+        self.assertEqual(len(messages), 2)  # 2 participants, 1 round
+        self.assertTrue(all(m.round == 1 for m in messages))
         bram_rows = [m for m in messages if m.thief.name == "Bram"]
         sable_rows = [m for m in messages if m.thief.name == "Sable"]
         self.assertTrue(all(m.text == "" for m in bram_rows))  # passed every round
         self.assertTrue(all(m.text == "Hi." for m in sable_rows))
         bram_calls = LlmCall.objects.filter(thief__name="Bram", purpose="parley_speak")
-        self.assertEqual(bram_calls.count(), 2)
+        self.assertEqual(bram_calls.count(), 1)
         self.assertTrue(all("network down" in row.error for row in bram_calls))
 
     def test_dusk_window_parleys_are_dusk(self):

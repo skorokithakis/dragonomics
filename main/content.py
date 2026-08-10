@@ -110,7 +110,7 @@ PARLEYS (private meetings)
    staying silent.
 - A parley of N participants runs N rounds; each round visits every
    participant once, in random order, and each may speak one message or
-   pass. A full round of silence ends the parley.
+   pass. A round where at most one thief speaks ends the parley.
 - Parley content is private, and so is the very existence of a parley:
    nobody outside the room learns that it even happened.
 
