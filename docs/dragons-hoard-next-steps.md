@@ -4,7 +4,7 @@ Date: 2026-08-09. Handoff note for the next working session.
 
 ## Where things stand
 
-The game design is complete. `docs/dragons-hoard-spec.md` (draft 2) is the single canonical reference: every phase, channel, capability, and the win condition are pinned. `docs/dragons-hoard-decisions.md` records all 14 decision sets with reasoning and simulation evidence; consult it when a spec choice needs its "why". `docs/dragons-hoard-draft-1.md` is the original draft, kept for history. Two simulation scripts are saved alongside: `sim-threshold.py` (the original fixed-threshold sweep) and `sim-hazard.py` (the Monte Carlo for the hazard ramp; its results are in decisions section 7).
+The game design is complete. `docs/dragons-hoard-spec.md` (draft 2) is the single canonical reference: every phase, channel, capability, and the win condition are pinned. `docs/dragons-hoard-decisions.md` records all 14 decision sets with reasoning and simulation evidence; consult it when a spec choice needs its "why". `docs/dragons-hoard-draft-1.md` is the original draft, kept for history. Two simulation scripts are saved alongside: `docs/sim-threshold.py` (the original fixed-threshold sweep) and `docs/sim-hazard.py` (the Monte Carlo for the hazard ramp; its results are in decisions section 7).
 
 What remains is content and engineering, not game design. In order:
 
@@ -26,7 +26,7 @@ A short technical document that fixes, exactly:
 
 ## 3. Build step 1: engine and day loop
 
-Python. Hardcoded rules, no agents, plain commons skin. Port `sim-hazard.py` into the engine's test suite as the first invariant check (same numbers must reproduce). Prove deterministic replay from database rows before adding anything else.
+Python. Hardcoded rules, no agents, plain commons skin. Port `docs/sim-hazard.py` into the engine's test suite as the first invariant check (same numbers must reproduce). Prove deterministic replay from database rows before adding anything else.
 
 ## 4. Build step 2: agents
 
