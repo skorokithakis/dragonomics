@@ -27,6 +27,7 @@ PROPOSAL_STATUSES = [
     ("failed", "Failed"),
     ("passed", "Passed"),
     ("law", "Law"),
+    ("void", "Void"),
 ]
 
 VOTES = [
@@ -49,6 +50,7 @@ class Game(models.Model):
     rage = models.BooleanField(default=False)
     status = models.CharField(max_length=32, choices=STATUSES, default="running")
     agents = models.BooleanField(default=False)
+    scratchpad = models.JSONField(default=dict)
     created = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -190,3 +192,44 @@ class LlmCall(models.Model):
 
     def __str__(self):
         return f"LlmCall {self.pk} ({self.purpose})"
+
+
+class RuleSet(models.Model):
+    """A version of the law: full Lua source in force from a given day.
+
+    The scratchpad is a snapshot of the game's scratchpad at enactment,
+    kept for replay; the engine reads only its ``inactive`` key (later
+    tickets). No Lua is executed here.
+    """
+
+    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="rulesets")
+    day = models.IntegerField()
+    code = models.TextField()
+    proposal = models.ForeignKey(
+        Proposal,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="rulesets",
+    )
+    scratchpad = models.JSONField(default=dict)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("day", "pk")
+
+    def __str__(self):
+        return f"RuleSet {self.pk} for {self.game} from day {self.day}"
+
+
+def active_ruleset(game):
+    """The rule set in force for ``game`` on its current day, or None.
+
+    Latest by (day, pk) among those with day <= game.day; None when the
+    statute book is blank (everything stays a no-op).
+    """
+    return (
+        RuleSet.objects.filter(game=game, day__lte=game.day)
+        .order_by("-day", "-pk")
+        .first()
+    )

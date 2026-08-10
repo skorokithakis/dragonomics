@@ -18,6 +18,7 @@ dependencies = [
     "werkzeug",
     "whitenoise",
     "openai>=2.53.0",
+    "lupa>=2.8",
 ]
 
 [dependency-groups]

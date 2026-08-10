@@ -10,6 +10,7 @@ from main.models import (
     Parley,
     ParleyMessage,
     Proposal,
+    RuleSet,
 )
 
 
@@ -35,6 +36,14 @@ def game_day(request, pk, day=None):
 
     dawn = list(Event.objects.filter(game=game, day=day, phase="dawn").order_by("id"))
     night = list(Event.objects.filter(game=game, day=day, phase="night").order_by("id"))
+    # The implementor section is audience-plane: the compile outcome (events)
+    # and the law source that takes effect from the next dawn (RuleSet).
+    implementor = list(
+        Event.objects.filter(game=game, day=day, phase="implementor").order_by("id")
+    )
+    next_ruleset = (
+        RuleSet.objects.filter(game=game, day=day + 1).order_by("-pk").first()
+    )
 
     parleys = {}
     for window in ("morning", "dusk"):
@@ -77,6 +86,17 @@ def game_day(request, pk, day=None):
     )
     floor_names = set(floor_event.payload.get("floor") or []) if floor_event else set()
 
+    # The law's visible acts — announcements, malfunctions, and score moves
+    # — can land in any phase. Dawn and night render them inline from their
+    # own event lists; the moot and implementor sections get theirs here.
+    law_acts = list(
+        Event.objects.filter(
+            game=game, day=day, type__in=("announce", "rule_error", "score_adjust")
+        ).order_by("id")
+    )
+    moot_law_acts = [event for event in law_acts if event.phase == "moot"]
+    implementor_law_acts = [event for event in law_acts if event.phase == "implementor"]
+
     context = {
         "game": game,
         "day": day,
@@ -84,11 +104,15 @@ def game_day(request, pk, day=None):
         "next_day": day + 1 if day < game.day else None,
         "dawn": dawn,
         "night": night,
+        "implementor": implementor,
+        "next_ruleset": next_ruleset,
         "parleys": parleys,
         "proposals": proposals,
         "floor_event": floor_event,
         "tally_event": tally_event,
         "debate": debate,
         "floor_names": floor_names,
+        "moot_law_acts": moot_law_acts,
+        "implementor_law_acts": implementor_law_acts,
     }
     return render(request, "game_day.html", context)

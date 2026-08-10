@@ -106,7 +106,13 @@ def context(thief):
     laws = list(Proposal.objects.filter(game=game, status="law").order_by("day", "pk"))
     if laws:
         lines.append("THE LAW BOOK (laws now in force, enacted at the Moot):")
-        lines.extend(f"- Day {p.day}, {p.author.name}: {p.text}" for p in laws)
+        for p in laws:
+            backing = (
+                "[enforced by the guild's magic]"
+                if p.rulesets.exists()
+                else "[prose only - no magic backs it]"
+            )
+            lines.append(f"- Day {p.day}, {p.author.name}: {p.text} {backing}")
     else:
         lines.append("THE LAW BOOK: the statute book is blank - there are no laws yet.")
 
@@ -128,6 +134,10 @@ def context(thief):
                 f"A hooded stranger paid {event.payload.get('thief')} "
                 f"{event.payload.get('amount')} gold."
             )
+        for event in Event.objects.filter(game=game, day=day, type="announce"):
+            # The law's public announcements reach every thief, like goal
+            # payouts: part of the day's public surface.
+            day_lines.append(f"Announcement: {event.payload.get('text', '')}")
         proposals = list(Proposal.objects.filter(game=game, day=day).order_by("pk"))
         if proposals:
             day_lines.append("Moot - proposals:")
@@ -186,6 +196,22 @@ def context(thief):
                 f"Night: {total} coins were stolen from the hoard in total. "
                 f"Your take: {own_take}."
             )
+        for event in Event.objects.filter(
+            game=game, day=day, type="beyond_guild_magic"
+        ):
+            # The guild's failure is in-world news: the law is void and the
+            # village knows it. The technical reason stays audience-plane.
+            author = event.payload.get("author")
+            if author:
+                day_lines.append(
+                    f"The guild declared {author}'s law beyond its magic; "
+                    "the law is void."
+                )
+            else:
+                day_lines.append(
+                    "The guild declared the day's law beyond its magic; "
+                    "the law is void."
+                )
         if day_lines:
             any_recent = True
             lines.append(f"--- Day {day}: what you saw ---")

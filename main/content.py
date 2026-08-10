@@ -98,8 +98,8 @@ THE LAW'S REACH (what an enacted law can and cannot do)
 - A law reads the true record of the game: the hoard, every thief's gold,
    and every thief's actual nightly takes. The law sees the night even
    though thieves do not.
-- A law can move gold (every transfer is logged), post announcements to
-   the public dawn report, and keep its own records in the village ledger:
+- A law can move gold (every transfer is logged), announce words the
+   whole village hears, and keep its own records in the village ledger:
    funds, vaults, offices, debts, prisons. A law can remove a thief from
    the game (death, exile, prison), and a later law can bring them back.
 - A law binds the acts that exist. It can cap, tax, or punish the night
@@ -109,11 +109,26 @@ THE LAW'S REACH (what an enacted law can and cannot do)
    thief. A law that requires an act outside these - an offering at dawn,
    a signature, an errand - is a dead letter: nobody can comply, nothing
    happens.
-- A law does not read parleys. Intercepting a parley's words, or
-   revealing that a meeting happened at all, are distinct powers that a
-   law must claim openly in its own text to use.
+- A law does not read parleys.
 - No law can change the six beats, the hoard and wake physics, the
    end-of-game rule, or anything in the VOTING section below.
+
+THE GUILD'S MAGIC (how laws become enforced power)
+
+- When a law passes, the guild compiles it into magic that runs by
+   itself from the next dawn.
+- The magic's powers are exactly these: adjust any thief's gold (every
+   transfer is logged), announce words the whole village hears,
+   keep records on the village slate - including the list of the dead
+   and the exiled, whom the magic skips entirely - and read what is
+   spoken at the public Moot, so words there can carry mechanical
+   weight.
+- The magic follows the letter of the law's prose, not its intent: a
+   loophole left in the text is a loophole in the law.
+- Thieves never see the magic itself - only the law's prose and its
+   effects.
+- The guild may declare a law beyond its magic. Such a law is void: it
+   binds no one and nothing happens.
 
 VOTING (immutable and exact - no law can gate, weight, or remove a vote)
 

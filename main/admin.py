@@ -10,6 +10,7 @@ from .models import (
     Parley,
     ParleyMessage,
     Proposal,
+    RuleSet,
     Thief,
     User,
 )
@@ -69,3 +70,9 @@ class ParleyMessageAdmin(admin.ModelAdmin):
 class LlmCallAdmin(admin.ModelAdmin):
     list_display = ("pk", "game", "thief", "day", "phase", "purpose", "created")
     list_filter = ("phase", "purpose")
+
+
+@admin.register(RuleSet)
+class RuleSetAdmin(admin.ModelAdmin):
+    list_display = ("pk", "game", "day", "proposal", "created")
+    list_filter = ("game", "day")

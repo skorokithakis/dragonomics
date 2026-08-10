@@ -3,14 +3,18 @@
 Every call (including retries) is recorded as an ``LlmCall`` row: the
 request messages, the raw response, and an error if the call or its parsing
 failed. The transport is a plain callable; the module-level ``client``
-object is what callers should use (``from main import llm; llm.client``),
-so tests can swap it for a fake without touching the network:
+(thieves) and ``implementor_client`` (the implementor/reviewer model)
+objects are what callers should use (``from main import llm; llm.client``),
+so tests can swap them for a fake without touching the network:
 
     llm.client = LlmClient(transport=fake_transport)
 
-The real transport reads ``LLM_API_KEY`` / ``LLM_BASE_URL`` / ``LLM_MODEL``
-from ``os.environ`` at call time, never at import time, so importing this
-module or constructing ``LlmClient()`` requires no configuration.
+The real transports read their configuration from ``os.environ`` at call
+time, never at import time, so importing this module or constructing
+``LlmClient()`` requires no configuration. The thief transport reads
+``LLM_API_KEY`` / ``LLM_BASE_URL`` / ``LLM_MODEL``; the implementor
+transport reads ``LLM_IMPLEMENTOR_API_KEY`` / ``LLM_IMPLEMENTOR_BASE_URL`` /
+``LLM_IMPLEMENTOR_MODEL``.
 """
 
 import json
@@ -31,27 +35,100 @@ class LlmError(Exception):
 # default, which can starve the actual answer: it would spend the whole
 # output budget thinking and reply with an empty string (observed against
 # the real API), and a capped runaway is a failure anyway. Thinking is
-# disabled explicitly; ``max_tokens`` remains as a backstop ceiling.
+# disabled explicitly; ``max_tokens`` remains as a backstop ceiling. The
+# implementor writes whole Lua files, so its ceiling is higher; the
+# Anthropic endpoint rejects the DeepSeek thinking knob as an unknown field,
+# so the implementor transport sends no ``extra_body`` at all.
 _TIMEOUT_SECONDS = 120.0
 _MAX_OUTPUT_TOKENS = 1500
+_MAX_IMPLEMENTOR_OUTPUT_TOKENS = 8000
 
 
-def _openai_transport(messages):
-    """Send ``messages`` to the configured model and return the reply text."""
+def _request_kwargs(messages, *, model, max_tokens, extra_body=None):
+    """Build the ``chat.completions.create`` kwargs for one model.
+
+    Kept separate from the transports so tests can inspect exactly what
+    would be sent to the API without any network access.
+    """
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+    }
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
+    return kwargs
+
+
+def _call_model(
+    messages,
+    *,
+    api_key_env,
+    base_url_env,
+    base_url_default,
+    model_env,
+    model_default,
+    max_tokens,
+    extra_body=None,
+):
+    """Send ``messages`` to the model and return the reply text.
+
+    The API key, base URL and model are read from ``os.environ`` at call
+    time; ``base_url_default`` / ``model_default`` apply when their
+    variables are unset.
+    """
     client = OpenAI(
-        api_key=os.environ.get("LLM_API_KEY"),
-        base_url=os.environ.get("LLM_BASE_URL", "https://api.deepseek.com"),
+        api_key=os.environ.get(api_key_env),
+        base_url=os.environ.get(base_url_env, base_url_default),
         timeout=_TIMEOUT_SECONDS,
         max_retries=0,
     )
-    model = os.environ.get("LLM_MODEL", "deepseek-v4-flash")
     response = client.chat.completions.create(
-        model=model,
-        messages=messages,
+        **_request_kwargs(
+            messages,
+            model=os.environ.get(model_env, model_default),
+            max_tokens=max_tokens,
+            extra_body=extra_body,
+        )
+    )
+    return response.choices[0].message.content or ""
+
+
+def _openai_transport(messages):
+    """Send ``messages`` to the thief model and return the reply text.
+
+    Configured by ``LLM_API_KEY`` / ``LLM_BASE_URL`` / ``LLM_MODEL``. This
+    transport talks to DeepSeek and disables its thinking explicitly.
+    """
+    return _call_model(
+        messages,
+        api_key_env="LLM_API_KEY",
+        base_url_env="LLM_BASE_URL",
+        base_url_default="https://api.deepseek.com",
+        model_env="LLM_MODEL",
+        model_default="deepseek-v4-flash",
         max_tokens=_MAX_OUTPUT_TOKENS,
         extra_body={"thinking": {"type": "disabled"}},
     )
-    return response.choices[0].message.content or ""
+
+
+def _implementor_transport(messages):
+    """Send ``messages`` to the implementor model and return the reply text.
+
+    Configured by ``LLM_IMPLEMENTOR_API_KEY`` / ``LLM_IMPLEMENTOR_BASE_URL``
+    / ``LLM_IMPLEMENTOR_MODEL``, pointing at Anthropic's OpenAI-compatible
+    endpoint. Unlike the thief transport it sends no ``extra_body``: the
+    endpoint rejects unknown fields such as DeepSeek's thinking knob.
+    """
+    return _call_model(
+        messages,
+        api_key_env="LLM_IMPLEMENTOR_API_KEY",
+        base_url_env="LLM_IMPLEMENTOR_BASE_URL",
+        base_url_default="https://api.anthropic.com/v1/",
+        model_env="LLM_IMPLEMENTOR_MODEL",
+        model_default="claude-fable-5",
+        max_tokens=_MAX_IMPLEMENTOR_OUTPUT_TOKENS,
+    )
 
 
 def _extract_json(text):
@@ -149,3 +226,4 @@ class LlmClient:
 
 
 client = LlmClient()
+implementor_client = LlmClient(transport=_implementor_transport)

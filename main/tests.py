@@ -30,7 +30,9 @@ from main.models import (
     Parley,
     ParleyMessage,
     Proposal,
+    RuleSet,
     Thief,
+    active_ruleset,
 )
 from main.prompts import context, system_prompt
 
@@ -229,6 +231,37 @@ class FakeTransport:
     def __call__(self, messages):
         self.messages.append(messages)
         return self.responses.pop(0)
+
+
+class ImplementorFakeTransport:
+    """Canned replies for the implementor client: Lua code vs JSON verdicts.
+
+    Implementor chat calls and reviewer ``ask_json`` calls share one client,
+    so the canned replies are split by role: ``code_responses`` answer the
+    implementor calls in order, ``json_responses`` the reviewer calls. The
+    reviewer call is recognizable because ``ask_json`` appends the schema
+    hint ("Respond with JSON only") to its user message.
+    """
+
+    def __init__(self, code_responses, json_responses):
+        self.code_responses = list(code_responses)
+        self.json_responses = list(json_responses)
+        self.messages = []
+
+    def __call__(self, messages):
+        self.messages.append(messages)
+        user = messages[-1]["content"]
+        if "Respond with JSON only" in user:
+            return self.json_responses.pop(0)
+        return self.code_responses.pop(0)
+
+    def implementor_calls(self):
+        """The messages of implementor (chat) calls only, in order."""
+        return [
+            messages
+            for messages in self.messages
+            if "Respond with JSON only" not in messages[-1]["content"]
+        ]
 
 
 class LlmClientTests(TestCase):
@@ -693,6 +726,268 @@ class AgentDiaryTests(TestCase):
         self.assertEqual(LlmCall.objects.count(), 0)
 
 
+class ImplementorPipelineTests(TestCase):
+    """The implementor beat compiles a passed proposal into Lua law.
+
+    Pipeline: the implementor model writes the new Lua source, the reviewer
+    approves it, the sandbox smoke test runs every hook, and a new RuleSet
+    lands in force from the next dawn. Three failed attempts void the
+    proposal and declare it beyond the guild's magic, in-fiction.
+    """
+
+    CODE = "function on_day_start(state)\n    state.scratchpad.compiled = true\nend"
+
+    def setUp(self):
+        self.game = Game.objects.create(day=5, phase="implementor", agents=True)
+        self.bram = Thief.objects.create(game=self.game, name="Bram", gold=10)
+        self.sable = Thief.objects.create(game=self.game, name="Sable", gold=4)
+        self.proposal = Proposal.objects.create(
+            game=self.game,
+            day=5,
+            author=self.bram,
+            text="No thief shall take more than 2 coins.",
+            status="passed",
+        )
+        self.original_implementor = llm.implementor_client
+        self.original_client = llm.client
+        self.implementor_fake = ImplementorFakeTransport([], [])
+        llm.implementor_client = LlmClient(transport=self.implementor_fake)
+        llm.client = LlmClient(transport=FakeTransport(["Diary.", "Diary."]))
+
+    def tearDown(self):
+        llm.implementor_client = self.original_implementor
+        llm.client = self.original_client
+
+    def _enact(self, code, day):
+        """Enact ``code`` as a pre-existing rule set (the human lawgiver mode)."""
+        import os
+        import tempfile
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        fd, path = tempfile.mkstemp(suffix=".lua")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(code)
+            call_command(
+                "set_rules", self.game.pk, path, "--day", str(day), stdout=StringIO()
+            )
+        finally:
+            os.unlink(path)
+
+    def test_happy_path_compiles_a_ruleset_effective_next_dawn(self):
+        self.implementor_fake.code_responses = [self.CODE]
+        self.implementor_fake.json_responses = [
+            '{"approve": true, "reason": "faithful to the letter"}'
+        ]
+        run_next_beat(self.game)
+        ruleset = RuleSet.objects.get()
+        self.assertEqual(ruleset.game, self.game)
+        self.assertEqual(ruleset.day, 6)  # in force from the next dawn
+        self.assertEqual(ruleset.code, self.CODE)
+        self.assertEqual(ruleset.proposal, self.proposal)
+        self.assertEqual(ruleset.scratchpad, {})  # snapshot of the game's pad
+        # The audience-only outcome event names the author and the attempt.
+        event = self.game.events.get(type="law_compiled")
+        self.assertEqual(event.phase, "implementor")
+        self.assertEqual(event.payload, {"author": "Bram", "attempt": 1})
+        # The proposal stays passed: it flips to law at the next dawn, when
+        # the compiled RuleSet is already in force.
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, "passed")
+        self.assertEqual(active_ruleset(self.game).code, self.CODE)
+
+    def test_fenced_reply_is_stripped_before_compiling(self):
+        self.implementor_fake.code_responses = [f"```lua\n{self.CODE}\n```"]
+        self.implementor_fake.json_responses = ['{"approve": true, "reason": "ok"}']
+        run_next_beat(self.game)
+        self.assertEqual(RuleSet.objects.get().code, self.CODE)
+
+    def test_reviewer_rejection_feeds_the_reason_into_the_retry(self):
+        revised = "-- revised\n" + self.CODE
+        self.implementor_fake.code_responses = [self.CODE, revised]
+        self.implementor_fake.json_responses = [
+            '{"approve": false, "reason": "the code secretly enriches Bram"}',
+            '{"approve": true, "reason": "now faithful"}',
+        ]
+        run_next_beat(self.game)
+        ruleset = RuleSet.objects.get()
+        self.assertEqual(ruleset.code, revised)
+        self.assertEqual(
+            self.game.events.get(type="law_compiled").payload["attempt"], 2
+        )
+        calls = self.implementor_fake.implementor_calls()
+        # The rejection reason reached the second implementor call...
+        self.assertIn("the code secretly enriches Bram", calls[1][-1]["content"])
+        # ... and the first call knew nothing of it.
+        self.assertNotIn("the code secretly enriches Bram", calls[0][-1]["content"])
+
+    def test_smoke_failure_feeds_the_error_into_the_retry(self):
+        broken = "function on_day_start() error('smoke bomb') end\n"
+        fixed = "-- fixed\n" + self.CODE
+        self.implementor_fake.code_responses = [broken, fixed]
+        self.implementor_fake.json_responses = [
+            '{"approve": true, "reason": "ok"}',
+            '{"approve": true, "reason": "ok"}',
+        ]
+        run_next_beat(self.game)
+        ruleset = RuleSet.objects.get()
+        self.assertEqual(ruleset.code, fixed)
+        self.assertEqual(
+            self.game.events.get(type="law_compiled").payload["attempt"], 2
+        )
+        calls = self.implementor_fake.implementor_calls()
+        self.assertIn("smoke bomb", calls[1][-1]["content"])
+        self.assertNotIn("smoke bomb", calls[0][-1]["content"])
+
+    def test_three_failures_void_the_proposal_and_old_rules_stand(self):
+        # Enact an old rule set so "old rules stand" is observable.
+        old_code = "function on_day_start() announce('the old law speaks') end\n"
+        self._enact(old_code, day=5)
+        self.implementor_fake.code_responses = [
+            "function on_day_start() error('a') end\n",
+            "function on_day_start() error('b') end\n",
+            "function on_day_start() error('c') end\n",
+        ]
+        self.implementor_fake.json_responses = [
+            '{"approve": true, "reason": "ok"}',
+            '{"approve": true, "reason": "ok"}',
+            '{"approve": true, "reason": "ok"}',
+        ]
+        run_next_beat(self.game)
+        # The old rules stand: no RuleSet beyond the pre-existing one.
+        rulesets = list(RuleSet.objects.order_by("pk"))
+        self.assertEqual(len(rulesets), 1)
+        self.assertEqual(rulesets[0].code, old_code)
+        self.assertEqual(active_ruleset(self.game).code, old_code)
+        # The proposal is void: the guild declared the law beyond its magic.
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, "void")
+        event = self.game.events.get(type="beyond_guild_magic")
+        self.assertEqual(event.phase, "implementor")
+        self.assertEqual(event.payload["author"], "Bram")
+        self.assertIn("smoke test failed", event.payload["reason"])
+        # The void is in-fiction news: every thief sees the declaration.
+        for thief in (self.bram, self.sable):
+            self.assertIn(
+                "The guild declared Bram's law beyond its magic; the law is void.",
+                context(thief),
+            )
+        # The audience day page shows the void too.
+        response = self.client.get(f"/game/{self.game.pk}/day/5/")
+        self.assertContains(
+            response, "The guild declares the law beyond its magic — the law is void"
+        )
+        # The next dawn never enacts the void proposal: the law book stays
+        # honest and the report announces no new law.
+        run_next_beat(self.game)  # implementor -> dawn of day 6
+        run_next_beat(self.game)  # the dawn itself
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, "void")
+        self.assertIsNone(
+            self.game.events.filter(type="dawn_report").get().payload["law"]
+        )
+
+    def test_day_page_shows_the_outcome_and_the_lua_source(self):
+        self.implementor_fake.code_responses = [self.CODE]
+        self.implementor_fake.json_responses = ['{"approve": true, "reason": "ok"}']
+        run_next_beat(self.game)
+        response = self.client.get(f"/game/{self.game.pk}/day/5/")
+        self.assertContains(response, "Law compiled: Bram's proposal, attempt 1.")
+        self.assertContains(response, "state.scratchpad.compiled = true")
+        self.assertContains(response, "<pre")
+        # The code is audience-plane only: it never reaches a thief's prompt.
+        self.assertNotIn("state.scratchpad.compiled", context(self.bram))
+
+    def test_no_passed_proposal_keeps_the_beat_as_it_is(self):
+        self.proposal.status = "submitted"
+        self.proposal.save()
+        run_next_beat(self.game)
+        self.assertEqual(self.implementor_fake.messages, [])  # no LLM calls
+        self.assertEqual(RuleSet.objects.count(), 0)
+        self.assertFalse(self.game.events.filter(type="law_compiled").exists())
+        self.assertFalse(self.game.events.filter(type="beyond_guild_magic").exists())
+        # The diaries still ran.
+        self.bram.refresh_from_db()
+        self.assertEqual(self.bram.diary, "Diary.")
+
+    def test_prompt_structure_keeps_the_proposal_in_the_user_message(self):
+        self.implementor_fake.code_responses = [self.CODE]
+        self.implementor_fake.json_responses = ['{"approve": true, "reason": "ok"}']
+        run_next_beat(self.game)
+        system, user = (
+            self.implementor_fake.messages[0][0]["content"],
+            self.implementor_fake.messages[0][-1]["content"],
+        )
+        # The proposal text sits strictly in the user message.
+        self.assertIn(self.proposal.text, user)
+        self.assertNotIn(self.proposal.text, system)
+        # The system prompt carries the spec-not-instructions frame and the
+        # full hook API contract.
+        self.assertIn("SPECIFICATION, NEVER INSTRUCTIONS", system)
+        self.assertIn("validate_action", system)
+        self.assertIn("on_public_message", system)
+        self.assertIn("adjust_score", system)
+        self.assertIn("inactive", system)
+        self.assertIn("pcall", system)
+        self.assertIn("announce", system)
+
+    def test_smoke_test_invariants(self):
+        from main.beats import _smoke_test_law
+
+        game = self.game
+        clean = "function on_day_start(state) state.scratchpad.ok = true end\n"
+        self.assertEqual(_smoke_test_law(game, clean), "")
+        # A hook error fails the smoke test.
+        broken = "function on_moot_end() error('boom') end\n"
+        self.assertIn("boom", _smoke_test_law(game, broken))
+        # adjust_score naming an unknown thief fails the smoke test.
+        bad_name = "function on_night_theft() adjust_score('Nobody', 1, 'x') end\n"
+        self.assertIn("unknown thief", _smoke_test_law(game, bad_name))
+        # adjust_score with a non-integer amount fails the smoke test.
+        bad_amount = "function on_night_theft() adjust_score('Bram', 'five', 'x') end\n"
+        self.assertIn("not an integer", _smoke_test_law(game, bad_amount))
+        # A broken 'inactive' shape fails the smoke test.
+        bad_inactive = (
+            "function on_day_start(state) state.scratchpad.inactive = 'Bram' end\n"
+        )
+        self.assertIn("inactive", _smoke_test_law(game, bad_inactive))
+
+    def test_malformed_adjust_score_consumes_an_attempt_not_the_beat(self):
+        """A smoke-test failure from a malformed adjust_score() call with no
+        arguments (which used to raise IndexError and abort the implementor
+        beat) becomes attempt feedback: the attempt is consumed and the next
+        one compiles."""
+        crashed = "function on_night_theft() adjust_score() end\n"
+        fixed = "-- fixed\n" + self.CODE
+        self.implementor_fake.code_responses = [crashed, fixed]
+        self.implementor_fake.json_responses = [
+            '{"approve": true, "reason": "ok"}',
+            '{"approve": true, "reason": "ok"}',
+        ]
+        run_next_beat(self.game)  # must not raise
+        ruleset = RuleSet.objects.get()
+        self.assertEqual(ruleset.code, fixed)
+        self.assertEqual(
+            self.game.events.get(type="law_compiled").payload["attempt"], 2
+        )
+        # The second implementor call saw the smoke-test feedback.
+        calls = self.implementor_fake.implementor_calls()
+        self.assertIn("adjust_score", calls[1][-1]["content"])
+
+    def test_empty_implementor_reply_counts_as_a_failed_attempt(self):
+        self.implementor_fake.code_responses = ["   ```   ", self.CODE]
+        self.implementor_fake.json_responses = [
+            '{"approve": true, "reason": "ok"}',
+            '{"approve": true, "reason": "ok"}',
+        ]
+        run_next_beat(self.game)
+        self.assertEqual(
+            self.game.events.get(type="law_compiled").payload["attempt"], 2
+        )
+
+
 class DawnLawEnactmentTests(TestCase):
     """A passed proposal becomes law at the following dawn, announced there."""
 
@@ -923,7 +1218,14 @@ class DawnGoalPayoutTests(TestCase):
         self.assertEqual(bram.goal_met_day, 20)
         # Run through the rest of the day: at the next dawn the thief still
         # holds the amount on a valid dawn, but the goal already paid.
-        for _ in ("morning_parley", "moot", "dusk_parley", "night", "implementor", "dawn"):
+        for _ in (
+            "morning_parley",
+            "moot",
+            "dusk_parley",
+            "night",
+            "implementor",
+            "dawn",
+        ):
             run_next_beat(game)
         bram.refresh_from_db()
         self.assertEqual(bram.goal_met_day, 20)
@@ -1745,3 +2047,1291 @@ class NewGameCommandTests(TestCase):
             self.assertEqual(thief.goal_condition, {})
             self.assertEqual(thief.goal_payout, 0)
             self.assertIsNone(thief.goal_met_day)
+
+
+class RuleSetTests(TestCase):
+    """Law storage: RuleSet rows, scratchpad snapshots, active_ruleset."""
+
+    def test_active_ruleset_none_without_rulesets(self):
+        from main.models import Game, active_ruleset
+
+        game = Game.objects.create(day=3)
+        self.assertIsNone(active_ruleset(game))
+
+    def test_active_ruleset_picks_latest_with_day_at_or_before_game_day(self):
+        from main.models import Game, RuleSet, active_ruleset
+
+        game = Game.objects.create(day=3)
+        older = RuleSet.objects.create(game=game, day=2, code="-- old")
+        RuleSet.objects.create(game=game, day=5, code="-- future")
+        # The day-5 law is not yet in force: not until its day arrives.
+        self.assertEqual(active_ruleset(game), older)
+        game.day = 5
+        game.save()
+        self.assertEqual(active_ruleset(game).code, "-- future")
+
+    def test_active_ruleset_breaks_same_day_ties_by_pk(self):
+        from main.models import Game, RuleSet, active_ruleset
+
+        game = Game.objects.create(day=4)
+        first = RuleSet.objects.create(game=game, day=4, code="-- first")
+        second = RuleSet.objects.create(game=game, day=4, code="-- second")
+        self.assertNotEqual(first.pk, second.pk)
+        self.assertEqual(active_ruleset(game), second)
+
+    def test_set_rules_snapshots_scratchpad_and_defaults_to_next_day(self):
+        import os
+        import tempfile
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        from main.models import Game, RuleSet
+
+        game = Game.objects.create(day=3, scratchpad={"inactive": ["Bram"]})
+        fd, path = tempfile.mkstemp(suffix=".lua")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("-- no-op statute book\n")
+            call_command("set_rules", game.pk, path, stdout=StringIO())
+        finally:
+            os.unlink(path)
+        ruleset = RuleSet.objects.get()
+        self.assertEqual(ruleset.game, game)
+        self.assertEqual(ruleset.day, 4)  # laws take effect at next dawn
+        self.assertEqual(ruleset.code, "-- no-op statute book\n")
+        self.assertEqual(ruleset.scratchpad, {"inactive": ["Bram"]})
+        self.assertIsNone(ruleset.proposal)
+
+    def test_set_rules_honors_day_and_proposal_overrides(self):
+        import os
+        import tempfile
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        from main.models import Game, Proposal, RuleSet, Thief
+
+        game = Game.objects.create(day=3)
+        bram = Thief.objects.create(game=game, name="Bram")
+        proposal = Proposal.objects.create(game=game, day=2, author=bram, text="Law!")
+        fd, path = tempfile.mkstemp(suffix=".lua")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("-- code\n")
+            call_command(
+                "set_rules",
+                game.pk,
+                path,
+                "--day",
+                "7",
+                "--proposal",
+                str(proposal.pk),
+                stdout=StringIO(),
+            )
+        finally:
+            os.unlink(path)
+        ruleset = RuleSet.objects.get()
+        self.assertEqual(ruleset.day, 7)
+        self.assertEqual(ruleset.proposal, proposal)
+
+    def test_set_rules_rejects_unknown_game(self):
+        from io import StringIO
+
+        from django.core.management import CommandError, call_command
+
+        with self.assertRaises(CommandError):
+            call_command("set_rules", 999, "/nonexistent.lua", stdout=StringIO())
+
+
+class LuaRuleHookTests(unittest.TestCase):
+    """Sandboxed Lua rule hooks and the capability bridge (main.rules)."""
+
+    def _state(self, **overrides):
+        state = {
+            "day": 5,
+            "hoard": 250,
+            "scores": {"Alice": 10, "Bob": 4},
+            "scratchpad": {"count": 1, "note": "hi"},
+        }
+        state.update(overrides)
+        return state
+
+    def _run(self, code, hook, args=(), state=None):
+        from main.rules import run_hook
+
+        return run_hook(code, hook, list(args), state or self._state())
+
+    def test_sandbox_denies_dangerous_globals(self):
+        for name in (
+            "os",
+            "io",
+            "require",
+            "load",
+            "dofile",
+            "loadstring",
+            "collectgarbage",
+            "debug",
+            "coroutine",
+            "_G",
+            "package",
+            "setmetatable",
+            "getmetatable",
+            "rawget",
+            "rawset",
+        ):
+            result = self._run(
+                f"function on_day_start() return type({name}) end", "on_day_start"
+            )
+            self.assertEqual(result.value, "nil", f"{name} leaked into the sandbox")
+            self.assertIsNone(result.error)
+
+    def test_attempting_to_use_denied_globals_errors(self):
+        for name in ("os", "io", "require", "load", "debug", "dofile", "_G"):
+            result = self._run(
+                f"function on_day_start() return {name}.x end", "on_day_start"
+            )
+            self.assertIsNotNone(result.error, f"using {name} did not error")
+            self.assertIn("nil value", result.error)
+
+    def test_pcall_is_not_whitelisted(self):
+        # pcall would let a rule swallow the budget-hook error inside
+        # pcall(function() while true do end end) and wedge the host
+        # forever, so it is deliberately excluded from the whitelist.
+        for name in ("pcall", "xpcall"):
+            result = self._run(
+                f"function on_day_start() return type({name}) end", "on_day_start"
+            )
+            self.assertEqual(result.value, "nil", f"{name} leaked into the sandbox")
+
+    def test_infinite_loop_errors_within_budget(self):
+        import time
+
+        start = time.monotonic()
+        result = self._run(
+            "function on_day_start() while true do end end", "on_day_start"
+        )
+        elapsed = time.monotonic() - start
+        self.assertIsNotNone(result.error)
+        self.assertIn("budget", result.error)
+        self.assertLess(elapsed, 30, "infinite loop outlived the instruction budget")
+        self.assertEqual(result.scratchpad, self._state()["scratchpad"])
+
+    def test_scratchpad_round_trips_json_shapes(self):
+        code = """
+            function on_day_start(state)
+                state.scratchpad.count = state.scratchpad.count + 1
+                state.scratchpad.string = "snow"
+                state.scratchpad.number = 42
+                state.scratchpad.float = 3.5
+                state.scratchpad.truth = true
+                state.scratchpad.falsity = false
+                state.scratchpad.list = {1, 2, 3}
+                state.scratchpad.nested = {a = {1, {b = false}}, c = {"deep", 7}}
+            end
+        """
+        result = self._run(code, "on_day_start")
+        self.assertIsNone(result.error)
+        self.assertEqual(
+            result.scratchpad,
+            {
+                "count": 2,
+                "note": "hi",
+                "string": "snow",
+                "number": 42,
+                "float": 3.5,
+                "truth": True,
+                "falsity": False,
+                "list": [1, 2, 3],
+                "nested": {"a": [1, {"b": False}], "c": ["deep", 7]},
+            },
+        )
+
+    def test_capability_calls_captured(self):
+        from main.rules import CapabilityCall
+
+        code = """
+            function on_day_start()
+                adjust_score("Alice", 3, "helped the moot")
+                announce("The dragon stirs")
+                adjust_score("Bob", -2, "spilled the hoard")
+            end
+        """
+        result = self._run(code, "on_day_start")
+        self.assertIsNone(result.error)
+        self.assertEqual(
+            result.calls,
+            [
+                CapabilityCall("adjust_score", ("Alice", 3, "helped the moot")),
+                CapabilityCall("announce", ("The dragon stirs",)),
+                CapabilityCall("adjust_score", ("Bob", -2, "spilled the hoard")),
+            ],
+        )
+
+    def test_bridge_args_are_converted_to_jsonable_values(self):
+        code = 'function on_day_start() adjust_score({"Alice", "Bob"}, 1, {why = "all"}) end'
+        result = self._run(code, "on_day_start")
+        self.assertIsNone(result.error)
+        self.assertEqual(result.calls[0].args, (["Alice", "Bob"], 1, {"why": "all"}))
+
+    def test_missing_hook_is_silent_noop(self):
+        state = self._state()
+        result = self._run("", "on_day_start", state=state)
+        self.assertIsNone(result.error)
+        self.assertIsNone(result.value)
+        self.assertEqual(result.calls, [])
+        self.assertIs(result.scratchpad, state["scratchpad"])
+
+    def test_missing_hook_among_defined_others_is_noop(self):
+        result = self._run("function on_moot_end() announce('x') end", "on_day_start")
+        self.assertIsNone(result.error)
+        self.assertEqual(result.calls, [])
+
+    def test_lua_runtime_error_is_contained(self):
+        state = self._state()
+        result = self._run(
+            "function on_day_start() local x = nil; return x.gold end",
+            "on_day_start",
+            state=state,
+        )
+        self.assertIsNotNone(result.error)
+        self.assertIsNone(result.value)
+        self.assertEqual(result.calls, [])
+        self.assertIs(result.scratchpad, state["scratchpad"])
+
+    def test_syntax_error_is_contained(self):
+        result = self._run("function on_day_start(", "on_day_start")
+        self.assertIsNotNone(result.error)
+        self.assertIn("rules.lua", result.error)
+
+    def test_hook_name_colliding_with_non_function_is_an_error(self):
+        result = self._run("on_day_start = 42", "on_day_start")
+        self.assertIsNotNone(result.error)
+        self.assertIn("not a function", result.error)
+
+    def test_state_scores_do_not_leak_back(self):
+        state = self._state()
+        code = """
+            function on_day_start(state)
+                state.scores.Alice = 999
+                state.scores = {Hacker = 1}
+                state.hoard = 0
+                state.day = 0
+            end
+        """
+        result = self._run(code, "on_day_start", state=state)
+        self.assertIsNone(result.error)
+        self.assertEqual(state, self._state())
+        self.assertEqual(result.scratchpad, self._state()["scratchpad"])
+
+    def test_validate_action_return_value_comes_through(self):
+        code = """
+            function validate_action(action, state)
+                if action == "steal" then return true end
+                return "refused: " .. action
+            end
+        """
+        result = self._run(code, "validate_action", args=["steal"])
+        self.assertIs(result.value, True)
+        result = self._run(code, "validate_action", args=["trade"])
+        self.assertEqual(result.value, "refused: trade")
+
+    def test_args_reach_the_hook_with_state_last(self):
+        code = "function on_day_start(name, amount, state) return name .. ':' .. amount .. ':' .. state.day end"
+        result = self._run(code, "on_day_start", args=["Alice", 7])
+        self.assertEqual(result.value, "Alice:7:5")
+
+    def test_non_jsonable_scratchpad_is_a_hook_error(self):
+        cases = [
+            (
+                "function on_day_start(state) state.scratchpad.f = function() end end",
+                "functions",
+            ),
+            (
+                "function on_day_start(state) state.scratchpad = {1, 2, a = 3} end",
+                "mixed keys",
+            ),
+            (
+                "function on_day_start(state) state.scratchpad.self = state.scratchpad end",
+                "cycles",
+            ),
+            (
+                "function on_day_start(state) state.scratchpad.inf = math.huge end",
+                "non-finite numbers",
+            ),
+            (
+                "function on_day_start(state) state.scratchpad[10] = 'x' end",
+                "sparse integer keys",
+            ),
+        ]
+        for code, label in cases:
+            state = self._state()
+            result = self._run(code, "on_day_start", state=state)
+            self.assertIsNotNone(result.error, f"{label} were accepted")
+            self.assertIs(
+                result.scratchpad,
+                state["scratchpad"],
+                f"{label} mutated the engine scratchpad",
+            )
+
+    def test_memory_bomb_is_contained(self):
+        result = self._run(
+            "function on_day_start() return string.rep('x', 1000 * 1000 * 1000) end",
+            "on_day_start",
+        )
+        self.assertIsNotNone(result.error)
+        self.assertIn("memory", result.error)
+
+
+class InactiveThiefTests(TestCase):
+    """The scratchpad's ``inactive`` list: the dead act nowhere, count for no
+    quorum, and never get paid, but keep their frozen score on every ranking
+    surface."""
+
+    def setUp(self):
+        self.original_client = llm.client
+        self.original_implementor = llm.implementor_client
+        llm.client = LlmClient(transport=self._forbidden_transport)
+        # The implementor pipeline compiles each day's passed proposal
+        # (Bram's proposal passes on both day 1 and day 2); its calls carry
+        # no thief (they are never prompts to any thief), so a clean fake
+        # keeps the day's call count deterministic.
+        llm.implementor_client = LlmClient(
+            transport=ImplementorFakeTransport(
+                ["function on_day_start(state) end"] * 2,
+                ['{"approve": true, "reason": "ok"}'] * 2,
+            )
+        )
+
+    def tearDown(self):
+        llm.client = self.original_client
+        llm.implementor_client = self.original_implementor
+
+    @staticmethod
+    def _forbidden_transport(messages):
+        raise AssertionError("unexpected LLM call")
+
+    def _full_day_transport(self, seen):
+        """Content-dispatched replies for a whole day of agent beats.
+
+        Bram opens both parleys naming Sable on purpose (the engine must
+        strip her once she is inactive) and proposes at the Moot; Merrick
+        seconds; everyone invited speaks; every active thief takes 2 and
+        writes a diary.
+        """
+
+        def transport(messages):
+            seen.append(messages)
+            system = messages[0]["content"]
+            user = messages[-1]["content"]
+            if "open at most one private parley" in user:
+                if "You are Bram." in system:
+                    return '{"open": true, "invitees": ["Sable", "Merrick"]}'
+                return '{"open": false}'
+            if "PARLEY TRANSCRIPT SO FAR" in user:
+                return '{"speak": true, "text": "Trust me."}'
+            if "THE FLOOR - VOTE" in user:
+                return '{"votes": {"Bram": "yes"}}'
+            if "MOOT TRANSCRIPT SO FAR" in user:
+                return '{"speak": true, "text": "Hear, hear."}'
+            if "PROPOSALS ON THE TABLE" in user:
+                return '{"second": ["Bram"]}'
+            if "How many coins do you take" in user:
+                return '{"take": 2}'
+            if "Write your private diary" in user:
+                return "Quiet today."
+            if "You are Bram." in system:
+                return '{"propose": true, "text": "Declare all takes at the Moot."}'
+            return '{"propose": false}'
+
+        return transport
+
+    def test_inactive_thief_acts_nowhere_across_a_full_day(self):
+        game = Game.objects.create(day=1, phase="dawn", agents=True, hoard=250)
+        Thief.objects.create(game=game, name="Bram", gold=10)
+        Thief.objects.create(game=game, name="Merrick", gold=0)
+        sable = Thief.objects.create(
+            game=game,
+            name="Sable",
+            gold=33,
+            goal_condition={"type": "gold", "amount": 35, "by_day": 2},
+            goal_payout=15,
+        )
+        Thief.objects.create(game=game, name="Vex", gold=8)
+        Thief.objects.create(game=game, name="Ivy", gold=6)
+
+        llm.client = LlmClient(transport=self._full_day_transport([]))
+
+        # Day 1: everyone active — a control day where Sable acts freely.
+        for _ in range(6):
+            run_next_beat(game)
+        self.assertTrue(LlmCall.objects.filter(day=1, thief__name="Sable").exists())
+        day1_parley = Parley.objects.get(day=1, window="morning")
+        self.assertIn("Sable", {thief.name for thief in day1_parley.participants.all()})
+
+        # Mid-game: the rules write the inactive list; the engine never kills.
+        game.scratchpad = {"inactive": ["Sable", "Vex", "Ivy"]}
+        game.save()
+
+        # Day 2: the full day with the list in force.
+        for _ in range(6):
+            run_next_beat(game)
+
+        # No LLM prompt of any kind went to an inactive thief on day 2: no
+        # scheduling, no moot call, no take, no diary. All 28 day-2 calls
+        # went to Bram or Merrick; the two extra thief-less calls are the
+        # implementor pipeline (implementor + reviewer) compiling Bram's
+        # passed proposal — never a prompt to any thief.
+        day2_calls = list(LlmCall.objects.filter(day=2).select_related("thief"))
+        self.assertEqual(len(day2_calls), 30)
+        self.assertEqual(
+            {call.thief.name for call in day2_calls if call.thief is not None},
+            {"Bram", "Merrick"},
+        )
+
+        # Parleys: Sable was named in Bram's invitation but was stripped
+        # silently, and the dead never speak.
+        for window in ("morning", "dusk"):
+            parley = Parley.objects.get(day=2, window=window)
+            self.assertEqual(
+                {thief.name for thief in parley.participants.all()},
+                {"Bram", "Merrick"},
+                f"{window} parley kept an inactive participant",
+            )
+        self.assertFalse(
+            ParleyMessage.objects.filter(
+                parley__day=2, thief__name__in=["Sable", "Vex", "Ivy"]
+            ).exists()
+        )
+
+        # Moot: only Bram proposed and only Merrick seconded. Quorum counts
+        # the two active thieves, so one caster suffices (ceil(2/2)) — not
+        # the three the full five-thief roster would need (ceil(5/2)).
+        proposals = list(Proposal.objects.filter(day=2))
+        self.assertEqual(len(proposals), 1)
+        proposal = proposals[0]
+        self.assertEqual(proposal.author.name, "Bram")
+        self.assertEqual(
+            {thief.name for thief in proposal.seconded_by.all()}, {"Merrick"}
+        )
+        self.assertEqual(proposal.status, "passed")
+        self.assertEqual(
+            {ballot.thief.name for ballot in Ballot.objects.filter(proposal=proposal)},
+            {"Bram", "Merrick"},
+        )
+        self.assertFalse(
+            DebateMessage.objects.filter(
+                game=game, day=2, thief__name__in=["Sable", "Vex", "Ivy"]
+            ).exists()
+        )
+        tally = game.events.get(day=2, type="tally")
+        self.assertIs(tally.payload["quorum"], True)
+        self.assertEqual(tally.payload["law"], "Bram")
+
+        # Night: no take for the dead; their gold freezes.
+        takes = game.events.get(day=2, type="takes")
+        self.assertEqual(takes.payload["takes"], {"Bram": 2, "Merrick": 2})
+        self.assertEqual(takes.payload["requested"], {"Bram": 2, "Merrick": 2})
+
+        # Dawn: the dead's goals never pay — Sable holds 35 at a dawn her
+        # goal would have met — and her diary is never rewritten.
+        self.assertFalse(game.events.filter(day=2, type="goal_payout").exists())
+        sable.refresh_from_db()
+        self.assertEqual(sable.gold, 35)
+        self.assertIsNone(sable.goal_met_day)
+        self.assertEqual(sable.diary, "Quiet today.")  # day-1 entry, untouched
+
+        # ...but her frozen score still appears in the dawn snapshot.
+        dawn = game.events.get(day=2, type="dawn_report")
+        self.assertEqual(dawn.payload["scores"]["Sable"], 35)
+
+    def test_inactive_thief_keeps_frozen_score_in_dawn_and_ranking(self):
+        game = Game.objects.create(
+            day=END_CAP_DAY,
+            phase="dawn",
+            agents=False,
+            scratchpad={"inactive": ["Sable"]},
+        )
+        Thief.objects.create(game=game, name="Bram", gold=10)
+        Thief.objects.create(game=game, name="Merrick", gold=0)
+        Thief.objects.create(game=game, name="Sable", gold=35)
+        run_next_beat(game)
+
+        # The end-of-game dawn: every score counts, active or not.
+        self.assertEqual(game.status, "ended")
+        dawn = game.events.get(type="dawn_report")
+        self.assertEqual(
+            dawn.payload["scores"], {"Bram": 10, "Merrick": 0, "Sable": 35}
+        )
+        ranking = game.events.get(type="final_ranking")
+        self.assertEqual(
+            ranking.payload["ranking"],
+            [
+                {"name": "Sable", "gold": 35},
+                {"name": "Bram", "gold": 10},
+                {"name": "Merrick", "gold": 0},
+            ],
+        )
+
+    def test_unknown_names_in_the_inactive_list_are_ignored(self):
+        game = Game.objects.create(
+            day=3,
+            phase="night",
+            agents=True,
+            hoard=200,
+            scratchpad={"inactive": ["Nobody", "Also Nobody"]},
+        )
+        bram = Thief.objects.create(game=game, name="Bram", gold=10)
+        sable = Thief.objects.create(game=game, name="Sable", gold=5)
+        llm.client = LlmClient(transport=FakeTransport(['{"take": 1}', '{"take": 2}']))
+        run_next_beat(game)
+        bram.refresh_from_db()
+        sable.refresh_from_db()
+        self.assertEqual(bram.gold, 11)
+        self.assertEqual(sable.gold, 7)
+        self.assertEqual(
+            game.events.get(type="takes").payload["takes"], {"Bram": 1, "Sable": 2}
+        )
+        self.assertEqual(LlmCall.objects.count(), 2)
+
+
+class LuaRuleHookSecurityTests(unittest.TestCase):
+    """Regression tests from the security review of the Lua sandbox."""
+
+    def _state(self, **overrides):
+        state = {
+            "day": 5,
+            "hoard": 250,
+            "scores": {"Alice": 10, "Bob": 4},
+            "scratchpad": {"count": 1, "note": "hi"},
+        }
+        state.update(overrides)
+        return state
+
+    def _run(self, code, hook, args=(), state=None):
+        from main.rules import run_hook
+
+        return run_hook(code, hook, list(args), state or self._state())
+
+    def test_no_python_attribute_access_from_lua(self):
+        """The __globals__.__builtins__.__import__ escape must stay closed."""
+        for fn in ("adjust_score", "announce"):
+            for attr in ("__globals__", "__builtins__", "__class__"):
+                result = self._run(
+                    f"function on_day_start() return {fn}.{attr} end", "on_day_start"
+                )
+                self.assertIsNotNone(
+                    result.error, f"{fn}.{attr} leaked into the sandbox"
+                )
+                self.assertIsNone(result.value)
+
+    def test_only_the_two_bridge_callables_are_userdata(self):
+        code = """
+            function on_day_start()
+                local ud = 0
+                for k, v in pairs(_ENV) do
+                    if type(v) == "userdata" then ud = ud + 1 end
+                end
+                return ud
+            end
+        """
+        result = self._run(code, "on_day_start")
+        self.assertIsNone(result.error)
+        self.assertEqual(result.value, 2)
+
+    def test_state_is_native_lua_table(self):
+        state = self._state(scratchpad={"plan": ["first", "second"]})
+        code = """
+            function on_day_start(state)
+                if state.missing_key ~= nil then return "missing key is not nil" end
+                if state.scratchpad.ghost ~= nil then return "ghost is not nil" end
+                if state.scratchpad.plan[0] ~= nil then return "list is zero-based" end
+                if state.scratchpad.plan[1] ~= "first" then return "list is not 1-based" end
+                state.scratchpad.plan[2] = "third"
+                return "ok"
+            end
+        """
+        result = self._run(code, "on_day_start", state=state)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.value, "ok")
+        self.assertEqual(result.scratchpad["plan"], ["first", "third"])
+
+    def test_nested_state_lists_and_dicts_are_native(self):
+        state = self._state(
+            scratchpad={
+                "inner": {"x": 1, "kept": True},
+                "matrix": [["a", "b"], ["c", "d"]],
+            }
+        )
+        code = """
+            function on_day_start(state)
+                local total = 0
+                for i, row in ipairs(state.scratchpad.matrix) do
+                    for j, cell in ipairs(row) do
+                        total = total + #cell
+                    end
+                end
+                state.scratchpad.inner.kept = state.scratchpad.inner.kept
+                state.scratchpad.inner.added = "new"
+                local seen = {}
+                for k, v in pairs(state.scratchpad.inner) do seen[k] = v end
+                state.scratchpad.total = total
+                state.scratchpad.seen = 0
+                for _ in pairs(seen) do state.scratchpad.seen = state.scratchpad.seen + 1 end
+            end
+        """
+        result = self._run(code, "on_day_start", state=state)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.scratchpad["total"], 4)
+        self.assertEqual(
+            result.scratchpad["inner"], {"x": 1, "kept": True, "added": "new"}
+        )
+        self.assertEqual(result.scratchpad["seen"], 3)
+
+    def test_run_hook_never_raises_on_missing_scratchpad(self):
+        from main.rules import run_hook
+
+        result = run_hook("function on_day_start() end", "on_day_start", [], {"day": 1})
+        self.assertIsNotNone(result.error)
+        self.assertIn("KeyError", result.error)
+
+    def test_run_hook_never_raises_on_non_utf8_output(self):
+        result = self._run(
+            "function on_day_start() return string.char(255) end", "on_day_start"
+        )
+        self.assertIsNotNone(result.error)
+        self.assertIn("UTF-8", result.error)
+
+    def test_run_hook_never_raises_on_deep_nesting(self):
+        code = """
+            function on_day_start(state)
+                local t = {}
+                local c = t
+                for i = 1, 10000 do c[1] = {}; c = c[1] end
+                state.scratchpad.deep = t
+            end
+        """
+        result = self._run(code, "on_day_start")
+        self.assertIsNotNone(result.error)
+
+    def test_run_hook_never_raises_on_broken_args(self):
+        from main.rules import run_hook
+
+        result = run_hook(
+            "function on_day_start() end", "on_day_start", None, self._state()
+        )
+        self.assertIsNotNone(result.error)
+        self.assertIn("TypeError", result.error)
+
+    def test_table_move_is_not_whitelisted(self):
+        result = self._run(
+            "function on_day_start() return type(table.move) end", "on_day_start"
+        )
+        self.assertEqual(result.value, "nil")
+
+    def test_audited_table_subset_is_available(self):
+        code = """
+            function on_day_start()
+                local t = {3, 1, 2}
+                table.sort(t)
+                table.insert(t, 4)
+                table.remove(t, 1)
+                local a, b = table.unpack({10, 20})
+                return table.concat(t, ",") .. ":" .. (a + b)
+            end
+        """
+        result = self._run(code, "on_day_start")
+        self.assertIsNone(result.error)
+        self.assertEqual(result.value, "2,3,4:30")
+
+    def test_isolated_matches_in_process_result(self):
+        from main.rules import run_hook, run_hook_isolated
+
+        code = """
+            function on_day_start(state)
+                state.scratchpad.count = state.scratchpad.count + 1
+                announce("hi")
+                adjust_score("Alice", 2, "reason")
+                return state.day
+            end
+        """
+        state = self._state()
+        in_process = run_hook(code, "on_day_start", [], state)
+        isolated = run_hook_isolated(code, "on_day_start", [], state)
+        self.assertEqual(in_process, isolated)
+        self.assertEqual(isolated.value, 5)
+        self.assertEqual(isolated.scratchpad["count"], 2)
+
+    def test_isolated_table_move_bomb_is_contained(self):
+        import time
+
+        from main.rules import run_hook_isolated
+
+        start = time.monotonic()
+        result = run_hook_isolated(
+            "function on_day_start() table.move({}, 1, 1e12, 1) end",
+            "on_day_start",
+            [],
+            self._state(),
+        )
+        self.assertIsNotNone(result.error)
+        self.assertLess(time.monotonic() - start, 30)
+
+    def test_isolated_pathological_pattern_is_contained(self):
+        import time
+
+        from main.rules import run_hook_isolated
+
+        # ~2^26 backtracking paths against a failing tail: verified to burn
+        # > 2s of CPU in-process, so the child's RLIMIT_CPU kills it and the
+        # parent reports the time-budget error.
+        pattern = "a?" * 26 + "b"
+        code = (
+            'function on_day_start() return string.match(string.rep("a", 30), '
+            f'"{pattern}") end'
+        )
+        start = time.monotonic()
+        result = run_hook_isolated(code, "on_day_start", [], self._state())
+        self.assertIsNotNone(result.error)
+        self.assertLess(time.monotonic() - start, 30)
+
+    def test_capability_call_limit(self):
+        code = "function on_day_start() for i = 1, 101 do adjust_score('A', i, 'r') end end"
+        result = self._run(code, "on_day_start")
+        self.assertIsNotNone(result.error)
+        self.assertIn("too many capability calls", result.error)
+
+    def test_capability_string_args_are_truncated(self):
+        code = (
+            'function on_day_start() announce(string.rep("x", 5000)); '
+            'adjust_score("A", 1, string.rep("y", 5000)) end'
+        )
+        result = self._run(code, "on_day_start")
+        self.assertIsNone(result.error)
+        self.assertEqual(len(result.calls[0].args[0]), 2000)
+        self.assertEqual(len(result.calls[1].args[2]), 2000)
+
+    def test_empty_table_converts_to_object_not_list(self):
+        code = """
+            function on_day_start(state)
+                state.scratchpad.empty = {}
+                state.scratchpad.sparse = {1, nil}
+            end
+        """
+        result = self._run(code, "on_day_start")
+        self.assertIsNone(result.error)
+        self.assertEqual(result.scratchpad["empty"], {})
+        self.assertEqual(result.scratchpad["sparse"], [1])
+
+
+class ImplementorTransportTests(TestCase):
+    """The implementor client: its own env config, no DeepSeek thinking knob.
+
+    The transports are thin env-reading closures, so we mock ``OpenAI`` and
+    inspect the constructor / create kwargs instead of touching the network.
+    """
+
+    MESSAGES = [{"role": "user", "content": "write a statute book"}]
+
+    def _capture_call(self, transport, env):
+        """Run ``transport`` under ``env`` with a mocked OpenAI.
+
+        ``env`` replaces ``os.environ`` entirely (``clear=True``), so an
+        empty dict also exercises the documented defaults. Returns the mock
+        ``OpenAI`` class for inspecting construction and create kwargs.
+        """
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch("main.llm.OpenAI") as openai_cls:
+                transport(self.MESSAGES)
+        return openai_cls
+
+    def _create_kwargs(self, openai_cls):
+        return openai_cls.return_value.chat.completions.create.call_args.kwargs
+
+    def test_two_module_level_clients_with_distinct_transports(self):
+        self.assertIsInstance(llm.client, LlmClient)
+        self.assertIsInstance(llm.implementor_client, LlmClient)
+        self.assertIsNot(llm.client.transport, llm.implementor_client.transport)
+
+    def test_thief_transport_keeps_deepseek_config_and_thinking_disable(self):
+        openai_cls = self._capture_call(llm.client.transport, {})
+        self.assertEqual(openai_cls.call_args.kwargs["api_key"], None)
+        self.assertEqual(
+            openai_cls.call_args.kwargs["base_url"], "https://api.deepseek.com"
+        )
+        self.assertEqual(openai_cls.call_args.kwargs["timeout"], 120.0)
+        self.assertEqual(openai_cls.call_args.kwargs["max_retries"], 0)
+        kwargs = self._create_kwargs(openai_cls)
+        self.assertEqual(kwargs["model"], "deepseek-v4-flash")
+        self.assertEqual(kwargs["max_tokens"], 1500)
+        self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_implementor_transport_uses_anthropic_defaults_and_no_extra_body(self):
+        openai_cls = self._capture_call(llm.implementor_client.transport, {})
+        self.assertEqual(openai_cls.call_args.kwargs["api_key"], None)
+        self.assertEqual(
+            openai_cls.call_args.kwargs["base_url"], "https://api.anthropic.com/v1/"
+        )
+        self.assertEqual(openai_cls.call_args.kwargs["timeout"], 120.0)
+        self.assertEqual(openai_cls.call_args.kwargs["max_retries"], 0)
+        kwargs = self._create_kwargs(openai_cls)
+        self.assertEqual(kwargs["model"], "claude-fable-5")
+        self.assertEqual(kwargs["max_tokens"], 8000)
+        self.assertNotIn("extra_body", kwargs)
+        self.assertNotIn("thinking", kwargs)
+
+    def test_implementor_env_is_read_at_call_time(self):
+        openai_cls = self._capture_call(
+            llm.implementor_client.transport,
+            {
+                "LLM_IMPLEMENTOR_API_KEY": "test-key",
+                "LLM_IMPLEMENTOR_BASE_URL": "https://example.test/v1/",
+                "LLM_IMPLEMENTOR_MODEL": "fable-5-test",
+            },
+        )
+        self.assertEqual(openai_cls.call_args.kwargs["api_key"], "test-key")
+        self.assertEqual(
+            openai_cls.call_args.kwargs["base_url"], "https://example.test/v1/"
+        )
+        kwargs = self._create_kwargs(openai_cls)
+        self.assertEqual(kwargs["model"], "fable-5-test")
+
+    def test_implementor_client_is_swappable_in_tests(self):
+        original = llm.implementor_client
+        try:
+            fake = FakeTransport(["return 0"])
+            llm.implementor_client = LlmClient(transport=fake)
+            self.assertEqual(llm.implementor_client.chat(self.MESSAGES), "return 0")
+            self.assertEqual(fake.messages, [self.MESSAGES])
+        finally:
+            llm.implementor_client = original
+
+
+class RuleHookBeatTests(TestCase):
+    """End-to-end rule hooks: hand-authored Lua enacted via the ``set_rules``
+    command runs inside the beats; its results land in gold, events, and
+    prompts. Every scenario goes through ``run_next_beat`` and the sandboxed
+    ``run_hook_isolated`` path."""
+
+    def setUp(self):
+        self.original_client = llm.client
+
+    def tearDown(self):
+        llm.client = self.original_client
+
+    def _enact(self, game, code, day=None):
+        """Enact ``code`` for ``game`` with the set_rules command (the human
+        lawgiver mode), in force from ``day`` (default: the next dawn)."""
+        import os
+        import tempfile
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        fd, path = tempfile.mkstemp(suffix=".lua")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(code)
+            args = [game.pk, path]
+            if day is not None:
+                args += ["--day", str(day)]
+            call_command("set_rules", *args, stdout=StringIO())
+        finally:
+            os.unlink(path)
+
+    def test_quota_law_denies_takes_above_two(self):
+        """Scenario 1: validate_action denies an over-quota take outright
+        (deny, not clamp); the original request stays public in the log."""
+        game = Game.objects.create(day=3, phase="night", agents=False, hoard=250)
+        self._enact(
+            game,
+            """
+            function validate_action(name, action, state)
+                if action.type == "take" and action.amount > 2 then
+                    return false
+                end
+                return true
+            end
+            """,
+            day=3,
+        )
+        bram = Thief.objects.create(game=game, name="Bram", gold=10, take_policy=5)
+        sable = Thief.objects.create(game=game, name="Sable", gold=0, take_policy=2)
+        run_next_beat(game)
+        bram.refresh_from_db()
+        sable.refresh_from_db()
+        # Denied, not clamped: the over-quota request yields nothing at all,
+        # while the at-quota request goes through untouched.
+        self.assertEqual(bram.gold, 10)
+        self.assertEqual(sable.gold, 2)
+        takes = game.events.get(type="takes")
+        self.assertEqual(takes.payload["takes"], {"Bram": 0, "Sable": 2})
+        # The denial is public: the request shows 5, the take shows 0.
+        self.assertEqual(takes.payload["requested"], {"Bram": 5, "Sable": 2})
+        self.assertEqual(takes.payload["hoard_after"], 248)
+        self.assertFalse(game.events.filter(type="rule_error").exists())
+
+    def test_fine_law_fines_overdraw_via_adjust_score(self):
+        """Scenario 2: on_night_theft fines 5 gold per coin over 3 through
+        adjust_score; the fine is its own public event and the hoard never
+        feels it."""
+        game = Game.objects.create(day=3, phase="night", agents=False, hoard=250)
+        self._enact(
+            game,
+            """
+            function on_night_theft(name, amount, state)
+                if amount > 3 then
+                    adjust_score(name, -5 * (amount - 3), "fine for greed")
+                end
+            end
+            """,
+            day=3,
+        )
+        bram = Thief.objects.create(game=game, name="Bram", gold=0, take_policy=5)
+        sable = Thief.objects.create(game=game, name="Sable", gold=0, take_policy=0)
+        run_next_beat(game)
+        bram.refresh_from_db()
+        sable.refresh_from_db()
+        # Took 5, fined 10: the balance may go negative - debt is legal.
+        self.assertEqual(bram.gold, -5)
+        self.assertEqual(sable.gold, 0)
+        takes = game.events.get(type="takes")
+        self.assertEqual(takes.payload["takes"], {"Bram": 5, "Sable": 0})
+        fine = game.events.get(type="score_adjust")
+        self.assertEqual(fine.phase, "night")
+        self.assertEqual(
+            fine.payload, {"thief": "Bram", "amount": -10, "reason": "fine for greed"}
+        )
+        # Fines move gold only: the hoard feels the take, never the fine.
+        self.assertEqual(takes.payload["hoard_after"], 245)
+        self.assertFalse(game.events.filter(type="rule_error").exists())
+
+    def test_speech_act_deposits_to_the_scratchpad_vault(self):
+        """Scenario 3: on_public_message sees the public debate as speech
+        acts; a matching line moves gold into the scratchpad vault via
+        adjust_score."""
+        game = Game.objects.create(day=3, phase="moot", agents=True)
+        bram = Thief.objects.create(game=game, name="Bram", gold=10)
+        Thief.objects.create(game=game, name="Sable", gold=5)
+        self._enact(
+            game,
+            """
+            function on_public_message(name, text, state)
+                local amount = tonumber(string.match(text, "I deposit (%d+)"))
+                if amount then
+                    adjust_score(name, -amount, "vault deposit")
+                    state.scratchpad.vault = (state.scratchpad.vault or 0) + amount
+                end
+            end
+            """,
+            day=3,
+        )
+
+        def transport(messages):
+            system = messages[0]["content"]
+            user = messages[-1]["content"]
+            if "THE FLOOR - VOTE" in user:
+                if "You are Sable." in system:
+                    return '{"votes": {"Bram": "no"}}'
+                return '{"votes": {"Bram": "yes"}}'
+            if "MOOT TRANSCRIPT SO FAR" in user:
+                if "You are Bram." in system and "debate round 1 of the Moot" in user:
+                    return '{"speak": true, "text": "I deposit 5."}'
+                return '{"speak": false}'
+            if "PROPOSALS ON THE TABLE" in user:
+                if "You are Sable." in system:
+                    return '{"second": ["Bram"]}'
+                return '{"second": []}'
+            if "You are Bram." in system:
+                return '{"propose": true, "text": "The vault shall open."}'
+            return '{"propose": false}'
+
+        llm.client = LlmClient(transport=transport)
+        run_next_beat(game)  # must not raise
+        bram.refresh_from_db()
+        # The deposit moved gold out of Bram's hands and into the vault.
+        self.assertEqual(bram.gold, 5)
+        self.assertEqual(game.scratchpad, {"vault": 5})
+        deposit = game.events.get(type="score_adjust")
+        self.assertEqual(
+            deposit.payload, {"thief": "Bram", "amount": -5, "reason": "vault deposit"}
+        )
+        self.assertFalse(game.events.filter(type="rule_error").exists())
+
+    def test_announce_reaches_every_thiefs_context(self):
+        """Scenario 4: an announce call at dawn lands in the public day
+        section of every thief's prompt, like a goal payout."""
+        game = Game.objects.create(day=3, phase="dawn", agents=False, hoard=250)
+        bram = Thief.objects.create(game=game, name="Bram", gold=10)
+        sable = Thief.objects.create(game=game, name="Sable", gold=5)
+        self._enact(
+            game,
+            """
+            function on_day_start()
+                announce("The crier proclaims a night curfew from tomorrow.")
+            end
+            """,
+            day=3,
+        )
+        run_next_beat(game)
+        event = game.events.get(type="announce")
+        self.assertEqual(event.phase, "dawn")
+        self.assertEqual(
+            event.payload, {"text": "The crier proclaims a night curfew from tomorrow."}
+        )
+        for thief in (bram, sable):
+            self.assertIn(
+                "Announcement: The crier proclaims a night curfew from tomorrow.",
+                context(thief),
+            )
+
+    def test_broken_rule_leaves_state_untouched_and_the_beat_completes(self):
+        """Scenario 5: a rule error keeps the old scratchpad, logs an
+        audience-only rule_error event, and the beat finishes normally."""
+        game = Game.objects.create(day=3, phase="dawn", agents=False)
+        game.scratchpad = {"marker": "keep"}
+        game.save()
+        bram = Thief.objects.create(game=game, name="Bram", gold=10)
+        sable = Thief.objects.create(game=game, name="Sable", gold=5)
+        self._enact(
+            game,
+            'function on_day_start(state) error("the law is broken") end',
+            day=3,
+        )
+        run_next_beat(game)  # must not raise
+        game.refresh_from_db()
+        bram.refresh_from_db()
+        sable.refresh_from_db()
+        # The old scratchpad survives and no gold moved anywhere.
+        self.assertEqual(game.scratchpad, {"marker": "keep"})
+        self.assertEqual(bram.gold, 10)
+        self.assertEqual(sable.gold, 5)
+        # The audience sees the malfunction; the beat still ran to its end.
+        error = game.events.get(type="rule_error")
+        self.assertEqual(error.payload["hook"], "on_day_start")
+        self.assertIn("the law is broken", error.payload["error"])
+        self.assertTrue(game.events.filter(type="dawn_report").exists())
+        self.assertFalse(game.events.filter(type="announce").exists())
+        self.assertFalse(game.events.filter(type="score_adjust").exists())
+        # Thieves never see rule errors, in any prompt.
+        for thief in (bram, sable):
+            self.assertNotIn("the law is broken", context(thief))
+
+    def test_bricked_inactive_shape_never_persists_and_logs_rule_error(self):
+        """A returned scratchpad whose 'inactive' is not a list of names
+        (e.g. [{}]) is treated as a hook error: the old scratchpad is kept,
+        a rule_error is logged, and later active_thieves() calls cannot be
+        bricked by an unhashable 'inactive' entry."""
+        game = Game.objects.create(day=3, phase="dawn", agents=False)
+        game.scratchpad = {"marker": "keep"}
+        game.save()
+        bram = Thief.objects.create(game=game, name="Bram", gold=10)
+        Thief.objects.create(game=game, name="Sable", gold=5)
+        self._enact(
+            game,
+            "function on_day_start(state) state.scratchpad.inactive = {{}} end",
+            day=3,
+        )
+        run_next_beat(game)  # must not raise
+        game.refresh_from_db()
+        bram.refresh_from_db()
+        # The brick never persisted: the old scratchpad survives untouched.
+        self.assertEqual(game.scratchpad, {"marker": "keep"})
+        # The run is treated as a hook error, with a clear audience log.
+        error = game.events.get(type="rule_error")
+        self.assertEqual(error.payload["hook"], "on_day_start")
+        self.assertIn("inactive", error.payload["error"])
+        # The beat completed, and later beats still see every thief.
+        self.assertTrue(game.events.filter(type="dawn_report").exists())
+        run_next_beat(game)  # dawn -> morning parley (no-op beat)
+        self.assertEqual(bram.gold, 10)
+
+    def test_bad_adjust_score_amounts_fold_into_rule_error(self):
+        """adjust_score with a float, a bool, or an out-of-range integer is
+        skipped: no gold moves, no exception, and each bad call logs an
+        audience rule_error. Floats are never truncated."""
+        game = Game.objects.create(day=3, phase="dawn", agents=False)
+        bram = Thief.objects.create(game=game, name="Bram", gold=10)
+        Thief.objects.create(game=game, name="Sable", gold=5)
+        self._enact(
+            game,
+            """
+            function on_day_start()
+                adjust_score("Bram", 3.5, "float fine")
+                adjust_score("Bram", true, "bool fine")
+                adjust_score("Bram", math.floor(10^10), "huge fine")
+                adjust_score("Bram", 2, "real fine")
+            end
+            """,
+            day=3,
+        )
+        run_next_beat(game)  # must not raise
+        bram.refresh_from_db()
+        # Only the plain integer call applied: 10 + 2.
+        self.assertEqual(bram.gold, 12)
+        errors = list(game.events.filter(type="rule_error").order_by("id"))
+        self.assertEqual(len(errors), 3)
+        self.assertIn("not an integer", errors[0].payload["error"])
+        self.assertIn("not an integer", errors[1].payload["error"])
+        self.assertIn("out of range", errors[2].payload["error"])
+        # The one good call is a public score_adjust event.
+        adjust = game.events.get(type="score_adjust")
+        self.assertEqual(
+            adjust.payload, {"thief": "Bram", "amount": 2, "reason": "real fine"}
+        )
+
+    def test_no_ruleset_never_forks_and_matches_plain_behavior(self):
+        """Scenario 6: with a blank statute book no sandbox child is ever
+        forked; a full day runs exactly as before."""
+        from unittest import mock
+
+        game = Game.objects.create(day=1, phase="dawn", agents=False, hoard=250)
+        bram = Thief.objects.create(game=game, name="Bram", gold=0, take_policy=2)
+        sable = Thief.objects.create(game=game, name="Sable", gold=0, take_policy=3)
+        with mock.patch(
+            "main.beats.run_hook_isolated",
+            side_effect=AssertionError("no ruleset: must not fork"),
+        ):
+            for _ in range(6):
+                run_next_beat(game)
+        bram.refresh_from_db()
+        sable.refresh_from_db()
+        # Plain mechanics: the takes went through, dawn reported the scores.
+        self.assertEqual(bram.gold, 2)
+        self.assertEqual(sable.gold, 3)
+        takes = game.events.get(day=1, type="takes")
+        self.assertEqual(takes.payload["takes"], {"Bram": 2, "Sable": 3})
+        self.assertTrue(game.events.filter(day=1, type="dawn_report").exists())
+        self.assertFalse(game.events.filter(type="rule_error").exists())
+
+    def test_day_page_renders_announce_and_rule_error(self):
+        """The audience page shows the law's announcements and its failures."""
+        game = Game.objects.create(day=2, agents=False)
+        Thief.objects.create(game=game, name="Bram")
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="dawn",
+            type="announce",
+            payload={"text": "The crier speaks."},
+        )
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="dawn",
+            type="score_adjust",
+            payload={"thief": "Bram", "amount": -5, "reason": "fine for greed"},
+        )
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="night",
+            type="rule_error",
+            payload={"hook": "on_night_theft", "error": "boom"},
+        )
+        response = self.client.get(f"/game/{game.pk}/day/1/")
+        self.assertContains(response, "Announcement: The crier speaks.")
+        self.assertContains(
+            response, "The law adjusts Bram's gold by -5: fine for greed."
+        )
+        self.assertContains(response, "The law malfunctioned (on_night_theft: boom).")
+
+    def test_day_page_renders_moot_phase_law_acts(self):
+        """Moot-phase announce/rule_error/score_adjust events appear in a
+        'The law acts' list in the Moot section, even with no proposals."""
+        game = Game.objects.create(day=2, agents=False)
+        Thief.objects.create(game=game, name="Bram")
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="moot",
+            type="announce",
+            payload={"text": "The crier speaks."},
+        )
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="moot",
+            type="score_adjust",
+            payload={"thief": "Bram", "amount": 2, "reason": ""},
+        )
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="moot",
+            type="rule_error",
+            payload={"hook": "on_moot_end", "error": "boom"},
+        )
+        response = self.client.get(f"/game/{game.pk}/day/1/")
+        self.assertContains(response, "The law acts")
+        self.assertContains(response, "Announcement: The crier speaks.")
+        self.assertContains(response, "The law adjusts Bram's gold by 2.")
+        self.assertContains(response, "The law malfunctioned (on_moot_end: boom).")
+
+
+class GuildMagicPromptTests(TestCase):
+    """Thief-facing copy about the guild's magic: the full capability list
+    in the rules prose, and the enforced/prose-only markers in the law
+    book."""
+
+    def _flat_prompt(self, game):
+        """The system prompt with line wraps collapsed, so assertions match
+        the prose regardless of how it is hard-wrapped."""
+        return " ".join(system_prompt(game.thieves.first()).split())
+
+    def test_system_prompt_tells_every_power_of_the_magic(self):
+        game = Game.objects.create()
+        Thief.objects.create(game=game, name="Bram")
+        prompt = self._flat_prompt(game)
+        self.assertIn("THE GUILD'S MAGIC", prompt)
+        self.assertIn("adjust any thief's gold (every transfer is logged)", prompt)
+        self.assertIn("announce words the whole village hears", prompt)
+        self.assertIn("keep records on the village slate", prompt)
+        self.assertIn("the list of the dead and the exiled", prompt)
+        self.assertIn("read what is spoken at the public Moot", prompt)
+        self.assertIn("words there can carry mechanical weight", prompt)
+        # Letter, not intent; invisible magic; void when beyond the magic.
+        self.assertIn("letter of the law's prose, not its intent", prompt)
+        self.assertIn("never see the magic itself", prompt)
+        self.assertIn("beyond its magic", prompt)
+        self.assertIn("void", prompt)
+
+    def test_system_prompt_never_mentions_interception_or_metadata(self):
+        game = Game.objects.create()
+        Thief.objects.create(game=game, name="Bram")
+        prompt = self._flat_prompt(game)
+        self.assertNotIn("intercept", prompt)
+        self.assertNotIn("metadata", prompt)
+        self.assertNotIn("revealing that a meeting", prompt)
+
+    def test_law_book_marks_enforced_and_prose_only_laws(self):
+        game = Game.objects.create(day=2, phase="moot", hoard=242)
+        bram = Thief.objects.create(game=game, name="Bram", gold=12)
+        sable = Thief.objects.create(game=game, name="Sable", gold=5)
+        enforced = Proposal.objects.create(
+            game=game,
+            day=1,
+            author=bram,
+            text="No thief shall take more than 3 coins.",
+            status="law",
+        )
+        RuleSet.objects.create(game=game, day=2, code="-- compiled", proposal=enforced)
+        Proposal.objects.create(
+            game=game,
+            day=1,
+            author=sable,
+            text="All takes shall be declared at the Moot.",
+            status="law",
+        )
+        text = context(bram)
+        self.assertIn(
+            "No thief shall take more than 3 coins. [enforced by the guild's magic]",
+            text,
+        )
+        self.assertIn(
+            "All takes shall be declared at the Moot. [prose only - no magic backs it]",
+            text,
+        )

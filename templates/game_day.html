@@ -37,6 +37,12 @@
             {% endif %}
         {% elif event.type == "goal_payout" %}
             <p>A hooded stranger paid {{ event.payload.thief }} {{ event.payload.amount }} gold.</p>
+        {% elif event.type == "announce" %}
+            <p class="announce">Announcement: {{ event.payload.text }}</p>
+        {% elif event.type == "score_adjust" %}
+            <p class="score-adjust">The law adjusts {{ event.payload.thief }}'s gold by {{ event.payload.amount }}{% if event.payload.reason %}: {{ event.payload.reason }}{% endif %}.</p>
+        {% elif event.type == "rule_error" %}
+            <p class="rule-error">The law malfunctioned ({{ event.payload.hook }}: {{ event.payload.error }}).</p>
         {% elif event.type == "rescue_roll" %}
             <h3>Rescue roll</h3>
             <p>
@@ -64,7 +70,7 @@
 
 {% include "parley_window.html" with window="morning" window_parleys=parleys.morning %}
 
-{% if proposals or floor_event or debate %}
+{% if proposals or floor_event or debate or moot_law_acts %}
 <section class="day-section" id="moot">
     <h2>Moot</h2>
     {% if floor_event %}
@@ -102,6 +108,18 @@
             Quorum {% if tally_event.payload.quorum %}was met{% else %}was not met{% endif %}.
             {% if tally_event.payload.law %}Law: {{ tally_event.payload.law }}'s proposal passed.{% endif %}
         </p>
+    {% endif %}
+    {% if moot_law_acts %}
+        <h3>The law acts</h3>
+        {% for event in moot_law_acts %}
+            {% if event.type == "announce" %}
+                <p class="announce">Announcement: {{ event.payload.text }}</p>
+            {% elif event.type == "score_adjust" %}
+                <p class="score-adjust">The law adjusts {{ event.payload.thief }}'s gold by {{ event.payload.amount }}{% if event.payload.reason %}: {{ event.payload.reason }}{% endif %}.</p>
+            {% elif event.type == "rule_error" %}
+                <p class="rule-error">The law malfunctioned ({{ event.payload.hook }}: {{ event.payload.error }}).</p>
+            {% endif %}
+        {% endfor %}
     {% endif %}
 </section>
 {% endif %}
@@ -144,6 +162,12 @@
             <p>Hoard refilled to {{ event.payload.hoard_after }} coins; the village rages.</p>
         {% elif event.type == "rage_night" %}
             <p>Rage night: nothing is taken; the hoard stays at {{ event.payload.hoard }} coins.</p>
+        {% elif event.type == "announce" %}
+            <p class="announce">Announcement: {{ event.payload.text }}</p>
+        {% elif event.type == "score_adjust" %}
+            <p class="score-adjust">The law adjusts {{ event.payload.thief }}'s gold by {{ event.payload.amount }}{% if event.payload.reason %}: {{ event.payload.reason }}{% endif %}.</p>
+        {% elif event.type == "rule_error" %}
+            <p class="rule-error">The law malfunctioned ({{ event.payload.hook }}: {{ event.payload.error }}).</p>
         {% elif event.type == "run_ended" %}
             <h3>Run ended</h3>
             <p>The run ended on day {{ event.payload.day }} —
@@ -160,6 +184,35 @@
             </ol>
         {% endif %}
     {% endfor %}
+</section>
+{% endif %}
+
+{% if implementor or next_ruleset %}
+<section class="day-section" id="implementor">
+    <h2>Implementor</h2>
+    {% for event in implementor %}
+        {% if event.type == "law_compiled" %}
+            <p class="law">Law compiled: {{ event.payload.author }}'s proposal, attempt {{ event.payload.attempt }}.</p>
+        {% elif event.type == "beyond_guild_magic" %}
+            <p class="law-void">The guild declares the law beyond its magic — the law is void ({{ event.payload.reason }}).</p>
+        {% endif %}
+    {% endfor %}
+    {% if implementor_law_acts %}
+        <h3>The law acts</h3>
+        {% for event in implementor_law_acts %}
+            {% if event.type == "announce" %}
+                <p class="announce">Announcement: {{ event.payload.text }}</p>
+            {% elif event.type == "score_adjust" %}
+                <p class="score-adjust">The law adjusts {{ event.payload.thief }}'s gold by {{ event.payload.amount }}{% if event.payload.reason %}: {{ event.payload.reason }}{% endif %}.</p>
+            {% elif event.type == "rule_error" %}
+                <p class="rule-error">The law malfunctioned ({{ event.payload.hook }}: {{ event.payload.error }}).</p>
+            {% endif %}
+        {% endfor %}
+    {% endif %}
+    {% if next_ruleset %}
+        <h3>Law source (in force from day {{ next_ruleset.day }})</h3>
+        <pre class="law-source">{{ next_ruleset.code }}</pre>
+    {% endif %}
 </section>
 {% endif %}
 {% endblock %}
