@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% load main_extras %}
+
+{% block title %}Game {{ game.pk }} · Day {{ day }}{% endblock %}
+
+{% block content %}
+<header class="game-header">
+    <h1>Game {{ game.pk }} — Day {{ day }}</h1>
+    <p class="game-meta">
+        Status: {{ game.get_status_display }} · Mode:
+        {% if game.agents %}agents{% else %}policy{% endif %} · Hoard: {{ game.hoard }}
+    </p>
+    <nav class="day-nav">
+        {% if prev_day %}
+            <a href="{% url "main:game_day" game.pk prev_day %}">← Day {{ prev_day }}</a>
+        {% endif %}
+        {% if next_day %}
+            <a href="{% url "main:game_day" game.pk next_day %}">Day {{ next_day }} →</a>
+        {% endif %}
+    </nav>
+</header>
+
+{% if dawn %}
+<section class="day-section" id="dawn">
+    <h2>Dawn</h2>
+    {% for event in dawn %}
+        {% if event.type == "dawn_report" %}
+            <h3>Dawn report</h3>
+            <p>The hoard holds {{ event.payload.hoard }} coins.</p>
+            <table class="scores">
+                {% for name, gold in event.payload.scores.items %}
+                    <tr><th scope="row">{{ name }}</th><td>{{ gold }}</td></tr>
+                {% endfor %}
+            </table>
+            {% if event.payload.law %}
+                <p class="law">Enacted law: {{ event.payload.law.author }} — “{{ event.payload.law.text }}”</p>
+            {% endif %}
+        {% elif event.type == "rescue_roll" %}
+            <h3>Rescue roll</h3>
+            <p>
+                {% if event.payload.rescued %}The run is rescued{% else %}The run is not rescued{% endif %}
+                (chance {{ event.payload.chance|floatformat:2 }}{% if event.payload.roll != None %}, roll {{ event.payload.roll|floatformat:3 }}{% endif %}).
+            </p>
+        {% elif event.type == "run_ended" %}
+            <h3>Run ended</h3>
+            <p>The run ended on day {{ event.payload.day }} —
+                {% if event.payload.reason == "rescue" %}rescued by the dawn die
+                {% elif event.payload.reason == "second_wake" %}a second waking burned the village
+                {% else %}{{ event.payload.reason }}{% endif %}.
+            </p>
+        {% elif event.type == "final_ranking" %}
+            <h3>Final ranking</h3>
+            <ol class="ranking">
+                {% for entry in event.payload.ranking %}
+                    <li>{{ entry.name }} — {{ entry.gold }}</li>
+                {% endfor %}
+            </ol>
+        {% endif %}
+    {% endfor %}
+</section>
+{% endif %}
+
+{% include "parley_window.html" with window="morning" window_parleys=parleys.morning %}
+
+{% if proposals or floor_event or debate %}
+<section class="day-section" id="moot">
+    <h2>Moot</h2>
+    {% if floor_event %}
+        <p class="floor-note">The floor went to: {{ floor_event.payload.floor|join:", " }}{% if floor_event.payload.lottery %} (by lottery){% endif %}.</p>
+    {% endif %}
+    {% for proposal in proposals %}
+        <article class="proposal">
+            <h3>{{ proposal.author.name }} · {{ proposal.get_status_display }}</h3>
+            <p class="proposal-text">{{ proposal.text }}</p>
+            {% if proposal.seconded_by.all %}
+                <p>Seconded by: {{ proposal.seconded_by.all|join:", " }}</p>
+            {% endif %}
+            {% if proposal.author.name in floor_names %}
+                <p class="tally">Tally: {{ proposal.yes }} yes, {{ proposal.no }} no, {{ proposal.abstain }} abstain.</p>
+                <ul class="ballots">
+                    {% for ballot in proposal.ballots.all %}
+                        <li>{{ ballot.thief.name }}: {{ ballot.get_choice_display }}</li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+        </article>
+    {% endfor %}
+    {% if debate %}
+        <h3>Debate</h3>
+        <ul class="transcript">
+            {% for message in debate %}
+                <li>
+                    <span class="round">r{{ message.round }}</span>
+                    <strong>{{ message.thief.name }}</strong>:
+                    {% if message.text %}{{ message.text }}{% else %}<span class="pass">(pass)</span>{% endif %}
+                </li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+    {% if tally_event %}
+        <p class="tally-note">
+            Quorum {% if tally_event.payload.quorum %}was met{% else %}was not met{% endif %}.
+            {% if tally_event.payload.law %}Law: {{ tally_event.payload.law }}'s proposal passed.{% endif %}
+        </p>
+    {% endif %}
+</section>
+{% endif %}
+
+{% include "parley_window.html" with window="dusk" window_parleys=parleys.dusk %}
+
+{% if night %}
+<section class="day-section" id="night">
+    <h2>Night</h2>
+    {% for event in night %}
+        {% if event.type == "takes" %}
+            <h3>Takes</h3>
+            <table class="takes">
+                <tr><th scope="col">Thief</th><th scope="col">Requested</th><th scope="col">Taken</th></tr>
+                {% for name, got in event.payload.takes.items %}
+                    <tr>
+                        <th scope="row">{{ name }}</th>
+                        <td>{{ event.payload.requested|get_item:name }}</td>
+                        <td>{{ got }}</td>
+                    </tr>
+                {% endfor %}
+            </table>
+            <p>Hoard after: {{ event.payload.hoard_after }} coins.</p>
+        {% elif event.type == "wake_roll" %}
+            <h3>Wake roll</h3>
+            <p>
+                Probability {{ event.payload.probability|floatformat:2 }}, roll {{ event.payload.roll|floatformat:3 }} —
+                {% if event.payload.woke %}the dragon wakes!{% else %}the dragon sleeps.{% endif %}
+            </p>
+        {% elif event.type == "regrow" %}
+            <p>The hoard regrows from {{ event.payload.hoard_before }} to {{ event.payload.hoard_after }} coins.</p>
+        {% elif event.type == "wake" %}
+            <h3>The dragon wakes</h3>
+            <p>Losses:</p>
+            <ul class="losses">
+                {% for name, loss in event.payload.losses.items %}
+                    <li>{{ name }}: {{ loss }}</li>
+                {% endfor %}
+            </ul>
+            <p>Hoard refilled to {{ event.payload.hoard_after }} coins; the village rages.</p>
+        {% elif event.type == "rage_night" %}
+            <p>Rage night: nothing is taken; the hoard stays at {{ event.payload.hoard }} coins.</p>
+        {% elif event.type == "run_ended" %}
+            <h3>Run ended</h3>
+            <p>The run ended on day {{ event.payload.day }} —
+                {% if event.payload.reason == "rescue" %}rescued by the dawn die
+                {% elif event.payload.reason == "second_wake" %}a second waking burned the village
+                {% else %}{{ event.payload.reason }}{% endif %}.
+            </p>
+        {% elif event.type == "final_ranking" %}
+            <h3>Final ranking</h3>
+            <ol class="ranking">
+                {% for entry in event.payload.ranking %}
+                    <li>{{ entry.name }} — {{ entry.gold }}</li>
+                {% endfor %}
+            </ol>
+        {% endif %}
+    {% endfor %}
+</section>
+{% endif %}
+{% endblock %}

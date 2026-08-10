@@ -1,7 +1,9 @@
 import random
 import unittest
+from datetime import timedelta
 
 from django.test import TestCase
+from django.utils import timezone
 
 from main import llm
 from main.beats import run_next_beat
@@ -1083,3 +1085,299 @@ class AgentMootTests(TestCase):
         self.assertEqual(Ballot.objects.count(), 0)
         self.assertEqual(DebateMessage.objects.count(), 0)
         self.assertEqual(LlmCall.objects.count(), 0)
+
+
+class GameDayPageTests(TestCase):
+    """The read-only day page: /game/<pk>/ and /game/<pk>/day/<n>/."""
+
+    NAMES = ["Bram", "Sable", "Merrick"]
+
+    def _make_game(self, day=2, agents=True):
+        game = Game.objects.create(day=day, agents=agents)
+        thieves = [Thief.objects.create(game=game, name=name) for name in self.NAMES]
+        return game, thieves
+
+    def test_unknown_game_is_404(self):
+        response = self.client.get("/game/999999/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_day_out_of_range_is_404(self):
+        game, _ = self._make_game(day=2)
+        for day in (0, -1, 3, 99):
+            response = self.client.get(f"/game/{game.pk}/day/{day}/")
+            self.assertEqual(response.status_code, 404)
+
+    def test_default_route_shows_latest_day(self):
+        game, _ = self._make_game(day=2)
+        response = self.client.get(f"/game/{game.pk}/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f"Game {game.pk} — Day 2")
+        self.assertTemplateUsed(response, "game_day.html")
+
+    def test_policy_game_renders_dawn_and_night_only(self):
+        game, _ = self._make_game(day=1, agents=False)
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="dawn",
+            type="dawn_report",
+            payload={"hoard": 250, "scores": {"Bram": 0, "Sable": 0}, "law": None},
+        )
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="night",
+            type="takes",
+            payload={
+                "takes": {"Bram": 2, "Sable": 2},
+                "requested": {"Bram": 2, "Sable": 2},
+                "hoard_after": 246,
+            },
+        )
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="night",
+            type="wake_roll",
+            payload={"probability": 0.1, "roll": 0.9, "woke": False},
+        )
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="night",
+            type="regrow",
+            payload={"hoard_before": 246, "hoard_after": 275},
+        )
+        response = self.client.get(f"/game/{game.pk}/day/1/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "policy")
+        self.assertContains(response, "The hoard holds 250 coins.")
+        self.assertContains(response, "Hoard after: 246 coins.")
+        self.assertContains(response, "246 to 275 coins.")
+        self.assertContains(response, "the dragon sleeps.")
+        self.assertNotContains(response, "Moot")
+        self.assertNotContains(response, "Parleys")
+
+    def test_agent_day_renders_parley_moot_and_night(self):
+        game, (bram, sable, merrick) = self._make_game(day=1, agents=True)
+
+        parley = Parley.objects.create(game=game, day=1, window="morning", opener=bram)
+        parley.participants.add(bram, sable)
+        ParleyMessage.objects.create(
+            parley=parley, round=1, thief=bram, order=0, text="Trust me."
+        )
+        ParleyMessage.objects.create(
+            parley=parley, round=1, thief=sable, order=1, text=""
+        )
+
+        floor_proposal = Proposal.objects.create(
+            game=game,
+            day=1,
+            author=bram,
+            text="Every thief shall declare their take.",
+            status="passed",
+            yes=2,
+            no=1,
+            abstain=0,
+        )
+        floor_proposal.seconded_by.add(sable, merrick)
+        Proposal.objects.create(
+            game=game,
+            day=1,
+            author=sable,
+            text="No thief shall take more than 2 coins.",
+            status="failed",
+        )
+        Ballot.objects.create(proposal=floor_proposal, thief=bram, choice="yes")
+        Ballot.objects.create(proposal=floor_proposal, thief=sable, choice="no")
+        Ballot.objects.create(proposal=floor_proposal, thief=merrick, choice="abstain")
+        DebateMessage.objects.create(
+            game=game, day=1, round=1, thief=bram, order=0, text="Hear, hear."
+        )
+        DebateMessage.objects.create(
+            game=game, day=1, round=1, thief=sable, order=1, text=""
+        )
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="moot",
+            type="floor",
+            payload={"floor": ["Bram"], "lottery": False},
+        )
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="moot",
+            type="tally",
+            payload={"quorum": True, "law": "Bram"},
+        )
+        Event.objects.create(
+            game=game,
+            day=1,
+            phase="night",
+            type="takes",
+            payload={
+                "takes": {"Bram": 2, "Sable": 0, "Merrick": 3},
+                "requested": {"Bram": 2, "Sable": 2, "Merrick": 3},
+                "hoard_after": 243,
+            },
+        )
+
+        response = self.client.get(f"/game/{game.pk}/day/1/")
+        self.assertEqual(response.status_code, 200)
+
+        # Parley: opener, participants, transcript, and visible passes.
+        self.assertContains(response, "Opened by Bram")
+        self.assertContains(response, "Trust me.")
+        self.assertContains(response, "(pass)")
+
+        # Moot: both proposals with status, seconders, floor note, tally,
+        # individual ballots, debate, quorum, and the law.
+        self.assertContains(response, "Bram · Passed")
+        self.assertContains(response, "Sable · Failed")
+        self.assertContains(response, "Every thief shall declare their take.")
+        self.assertContains(response, "Seconded by: Sable, Merrick")
+        self.assertContains(response, "The floor went to: Bram.")
+        self.assertContains(response, "Tally: 2 yes, 1 no, 0 abstain.")
+        self.assertContains(response, "Merrick: Abstain")
+        self.assertContains(response, "Hear, hear.")
+        self.assertContains(response, "Quorum was met.")
+        self.assertContains(response, "Law: Bram's proposal passed.")
+
+        # Night: requested vs taken per thief, plus the hoard after.
+        self.assertRegex(
+            response.content.decode(),
+            r"Sable</th>\s*<td>2</td>\s*<td>0</td>",
+        )
+        self.assertContains(response, "Hoard after: 243 coins.")
+
+        # Phase order: the morning parley renders before the Moot.
+        html = response.content.decode()
+        self.assertLess(
+            html.index("Opened by Bram"), html.index("The floor went to: Bram.")
+        )
+
+    def test_dusk_parley_renders_after_the_moot(self):
+        """The dusk parley window appears after the Moot section, matching the
+        day's chronological phase order (… moot → dusk parley → night)."""
+        game, (bram, sable, _) = self._make_game(day=1, agents=True)
+
+        morning = Parley.objects.create(game=game, day=1, window="morning", opener=bram)
+        morning.participants.add(bram)
+        ParleyMessage.objects.create(
+            parley=morning, round=1, thief=bram, order=0, text="Before the moot."
+        )
+
+        Proposal.objects.create(
+            game=game,
+            day=1,
+            author=bram,
+            text="The moot business.",
+            status="passed",
+        )
+
+        dusk = Parley.objects.create(game=game, day=1, window="dusk", opener=sable)
+        dusk.participants.add(sable)
+        ParleyMessage.objects.create(
+            parley=dusk, round=1, thief=sable, order=0, text="After the moot."
+        )
+
+        response = self.client.get(f"/game/{game.pk}/day/1/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Dusk parley")
+        self.assertContains(response, "After the moot.")
+
+        html = response.content.decode()
+        self.assertLess(
+            html.index("Before the moot."), html.index("The moot business.")
+        )
+        self.assertLess(html.index("The moot business."), html.index("After the moot."))
+
+    def test_wake_and_rage_night_events_render(self):
+        game, _ = self._make_game(day=3, agents=False)
+        Event.objects.create(
+            game=game,
+            day=2,
+            phase="night",
+            type="wake",
+            payload={
+                "wake": 1,
+                "losses": {"Bram": 2, "Sable": 0},
+                "hoard_after": 250,
+                "rage": True,
+            },
+        )
+        Event.objects.create(
+            game=game, day=3, phase="night", type="rage_night", payload={"hoard": 250}
+        )
+        wake_day = self.client.get(f"/game/{game.pk}/day/2/")
+        self.assertContains(wake_day, "The dragon wakes")
+        self.assertContains(wake_day, "Bram: 2")
+        self.assertContains(wake_day, "Hoard refilled to 250 coins")
+        rage_day = self.client.get(f"/game/{game.pk}/day/3/")
+        self.assertContains(rage_day, "Rage night")
+        self.assertContains(rage_day, "the hoard stays at 250 coins")
+
+    def test_prev_next_links_hidden_at_the_edges(self):
+        game, _ = self._make_game(day=2)
+        first = self.client.get(f"/game/{game.pk}/day/1/")
+        self.assertContains(first, "Day 2 →")
+        self.assertNotContains(first, "← Day")
+        last = self.client.get(f"/game/{game.pk}/day/2/")
+        self.assertContains(last, "← Day 1")
+        self.assertNotContains(last, "Day 3 →")
+        # The default route is the latest day, so it has no next link.
+        default = self.client.get(f"/game/{game.pk}/")
+        self.assertContains(default, "← Day 1")
+        self.assertNotContains(default, "Day 3 →")
+
+    def test_empty_day_still_renders_the_header(self):
+        game, _ = self._make_game(day=2)
+        response = self.client.get(f"/game/{game.pk}/day/1/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f"Game {game.pk} — Day 1")
+        self.assertContains(response, "agents")
+
+
+class IndexPageTests(TestCase):
+    """The game index: / lists all games, newest first, linking to each."""
+
+    def test_lists_games_newest_first(self):
+        older = Game.objects.create(
+            day=2, phase="moot", hoard=300, status="ended", agents=False
+        )
+        newer = Game.objects.create(
+            day=1, phase="dawn", hoard=250, status="running", agents=True
+        )
+        now = timezone.now()
+        Game.objects.filter(pk=older.pk).update(created=now - timedelta(hours=2))
+        Game.objects.filter(pk=newer.pk).update(created=now - timedelta(hours=1))
+        older.refresh_from_db()
+        newer.refresh_from_db()
+
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "index.html")
+
+        html = response.content.decode()
+        self.assertLess(html.index(f"Game {newer.pk}"), html.index(f"Game {older.pk}"))
+
+        # Each row carries id, day, phase, status, hoard, mode, and a link to
+        # the game's day page (pk-only reverse: latest-day route).
+        for game, phase, status, mode in (
+            (older, "Moot", "Ended", "policy"),
+            (newer, "Dawn", "Running", "agents"),
+        ):
+            row = html[html.index(f'href="/game/{game.pk}/"') :]
+            self.assertIn(f"Game {game.pk}", row)
+            self.assertIn(f"<td>{game.day}</td>", row)
+            self.assertIn(f">{phase}</td>", row)
+            self.assertIn(f">{status}</td>", row)
+            self.assertIn(f"<td>{game.hoard}</td>", row)
+            self.assertIn(f">{mode}</td>", row)
+            self.assertIn(game.created.strftime("%Y-%m-%d %H:%M"), row)
+
+    def test_empty_index_shows_placeholder(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No games yet.")

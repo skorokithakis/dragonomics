@@ -21,8 +21,11 @@ The reasoning behind every design decision (with simulation evidence) is in
   full Moot pipeline (proposals, seconds, floor lottery, debate, secret
   ballots), pick their night takes, and keep private diaries. Enacted laws
   are announced at dawn as prose in the law book.
+- **Audience frontend** (`main/views.py`): a read-only web interface — a
+  game index and a per-day page showing the dawn report, parleys, the Moot
+  (proposals, debate, ballots), and the night's takes and rolls.
 - **Not yet built**: the implementor (laws are prose and enforce nothing),
-  the narrator/audience frontend, deterministic replay.
+  the narrator, deterministic replay.
 
 Games also run in a no-LLM policy mode (each thief follows a fixed take
 policy), which is what the test suite uses — tests never touch the network.

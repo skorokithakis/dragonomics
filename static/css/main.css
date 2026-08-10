@@ -1,1 +1,71 @@
-body {}
+body {
+    font-family: system-ui, sans-serif;
+    line-height: 1.5;
+    color: #222;
+    max-width: 48rem;
+    margin: 0 auto;
+    padding: 1rem;
+}
+
+.game-header h1 {
+    margin-bottom: 0.25rem;
+}
+
+.game-meta {
+    color: #666;
+    margin: 0;
+}
+
+.day-nav {
+    display: flex;
+    gap: 1rem;
+    margin: 0.75rem 0;
+}
+
+.day-section {
+    border-top: 1px solid #ddd;
+    margin-top: 1.5rem;
+    padding-top: 0.5rem;
+}
+
+.scores, .takes {
+    border-collapse: collapse;
+    text-align: left;
+}
+
+.scores th, .scores td, .takes th, .takes td {
+    padding: 0.1rem 1rem 0.1rem 0;
+}
+
+.transcript, .ballots, .losses {
+    list-style: none;
+    padding-left: 0;
+}
+
+.transcript li, .ballots li, .losses li {
+    margin-bottom: 0.25rem;
+}
+
+.transcript p {
+    margin: 0.25rem 0;
+}
+
+.transcript hr {
+    border: none;
+    border-top: 1px dashed #ddd;
+    margin: 0.5rem 0;
+}
+
+.transcript .round {
+    color: #999;
+    font-size: 0.85em;
+}
+
+.pass {
+    color: #999;
+    font-style: italic;
+}
+
+.law {
+    font-weight: bold;
+}

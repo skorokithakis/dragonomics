@@ -1,0 +1,18 @@
+{% if window_parleys %}
+<section class="day-section" id="parley-{{ window }}">
+    <h2>{{ window|title }} parley</h2>
+    {% for parley in window_parleys %}
+        <article class="parley">
+            <h4>Opened by {{ parley.opener.name }}</h4>
+            <p>Participants: {{ parley.participants.all|join:", " }}</p>
+            <div class="transcript">
+                {% for message in parley.messages.all %}
+                    {% ifchanged message.round %}{% if not forloop.first %}<hr>{% endif %}{% endifchanged %}
+                    <p>— <strong>{{ message.thief.name }}</strong>:
+                        {% if message.text %}{{ message.text }}{% else %}<span class="pass">(pass)</span>{% endif %}</p>
+                {% endfor %}
+            </div>
+        </article>
+    {% endfor %}
+</section>
+{% endif %}

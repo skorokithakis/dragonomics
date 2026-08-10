@@ -2,8 +2,35 @@
 
 {% load i18n %}
 
-{% block title %}{% trans "Home" %}{% endblock %}
+{% block title %}{% trans "Games" %}{% endblock %}
 
 {% block content %}
-<p>{% trans "Hello!" %}</p>
+<h1>{% trans "Games" %}</h1>
+
+{% if games %}
+<table class="scores">
+    <tr>
+        <th scope="col">Game</th>
+        <th scope="col">Day</th>
+        <th scope="col">Phase</th>
+        <th scope="col">Status</th>
+        <th scope="col">Hoard</th>
+        <th scope="col">Mode</th>
+        <th scope="col">Created</th>
+    </tr>
+    {% for game in games %}
+        <tr>
+            <th scope="row"><a href="{% url "main:game_day" game.pk %}">Game {{ game.pk }}</a></th>
+            <td>{{ game.day }}</td>
+            <td>{{ game.get_phase_display }}</td>
+            <td>{{ game.get_status_display }}</td>
+            <td>{{ game.hoard }}</td>
+            <td>{% if game.agents %}agents{% else %}policy{% endif %}</td>
+            <td>{{ game.created|date:"Y-m-d H:i" }}</td>
+        </tr>
+    {% endfor %}
+</table>
+{% else %}
+<p>{% trans "No games yet." %}</p>
+{% endif %}
 {% endblock %}
