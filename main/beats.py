@@ -19,8 +19,11 @@ and one per parley turn for speaking, one per thief for the moot's
 proposal, seconds, and ballot, one per thief per debate round for speaking,
 and one per thief for the diary. Any failure falls back to a safe default
 (take 0, open no parley, pass, submit no proposal, second nothing, abstain,
-keep the old diary) and is logged. In policy games the fixed ``take_policy``
-is used and nothing else changes.
+keep the old diary) and is logged. Each decision point also emits a terse
+INFO progress line on this module's logger (``main.beats``); the advance
+command attaches a plain stdout handler while it runs so those lines stream
+live on the console. In policy games the fixed ``take_policy`` is used and
+nothing else changes.
 
 Event log: every notable event is written as an ``Event`` row; the log alone
 reconstructs a run — per-thief takes, every roll's outcome, wakes, endings,
@@ -59,7 +62,22 @@ from main.prompts import context, system_prompt
 
 _logger = logging.getLogger(__name__)
 
+# Agent-mode progress streams through this logger at INFO: the advance
+# command attaches a plain stdout handler while it runs. Propagation is off
+# so that, without a handler attached (tests, policy mode), records never
+# leak to the root logger or stderr.
+_logger.setLevel(logging.INFO)
+_logger.propagate = False
+
 _rng = random.Random()
+
+
+def _clip(text: str, limit: int = 100) -> str:
+    """Collapse whitespace and cut ``text`` to ``limit`` characters."""
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text
 
 
 def _log(game: Game, phase: str, type: str, payload: dict) -> None:
@@ -149,7 +167,6 @@ def _agent_take(game: Game, thief) -> int:
             or not 0 <= take <= TAKE_MAX
         ):
             raise ValueError(f"take {take!r} outside 0..{TAKE_MAX}")
-        return take
     except Exception as err:
         _logger.warning(
             "Night take for %s on day %d failed, defaulting to 0: %s",
@@ -157,7 +174,9 @@ def _agent_take(game: Game, thief) -> int:
             game.day,
             err,
         )
-        return 0
+        take = 0
+    _logger.info("Day %d night: %s requests %d", game.day, thief.name, take)
+    return take
 
 
 def _beat_night(game: Game) -> None:
@@ -271,6 +290,7 @@ def _agent_diary(game: Game, thief) -> None:
             game.day,
             err,
         )
+        _logger.info("Day %d implementor: %s keeps old diary", game.day, thief.name)
         return
     if not text.strip():
         _logger.warning(
@@ -278,9 +298,11 @@ def _agent_diary(game: Game, thief) -> None:
             thief.name,
             game.day,
         )
+        _logger.info("Day %d implementor: %s keeps old diary", game.day, thief.name)
         return
     thief.diary = text.strip()
     thief.save(update_fields=["diary"])
+    _logger.info("Day %d implementor: %s writes diary", game.day, thief.name)
 
 
 _WINDOWS = {"morning_parley": "morning", "dusk_parley": "dusk"}
@@ -304,11 +326,24 @@ def _beat_parley(game: Game) -> None:
     for opener in thieves:
         invitees = _agent_parley_open(game, opener, window, by_name)
         if invitees is None:
+            _logger.info(
+                "Day %d %s parley: %s opens nothing",
+                game.day,
+                window,
+                opener.name,
+            )
             continue
         parley = Parley.objects.create(
             game=game, day=game.day, window=window, opener=opener
         )
         parley.participants.add(opener, *invitees)
+        _logger.info(
+            "Day %d %s parley: %s opens with %s",
+            game.day,
+            window,
+            opener.name,
+            ", ".join(invitee.name for invitee in invitees),
+        )
         parleys.append(parley)
     for parley in parleys:
         _run_parley(game, parley)
@@ -444,6 +479,28 @@ def _parley_speak(game: Game, parley: Parley, thief, round_no: int, order: int) 
     ParleyMessage.objects.create(
         parley=parley, round=round_no, thief=thief, text=text, order=order
     )
+    total_rounds = parley.participants.count()
+    if text:
+        _logger.info(
+            "Day %d %s parley (%s's): %s round %d/%d: %s",
+            game.day,
+            parley.window,
+            parley.opener.name,
+            thief.name,
+            round_no,
+            total_rounds,
+            _clip(text),
+        )
+    else:
+        _logger.info(
+            "Day %d %s parley (%s's): %s round %d/%d: passes",
+            game.day,
+            parley.window,
+            parley.opener.name,
+            thief.name,
+            round_no,
+            total_rounds,
+        )
 
 
 def _beat_moot(game: Game) -> None:
@@ -565,6 +622,16 @@ def _beat_moot(game: Game) -> None:
         else:
             proposal.status = "failed"
         proposal.save(update_fields=["yes", "no", "abstain", "status"])
+    _logger.info(
+        "Day %d moot tally (%s): %s; %s",
+        game.day,
+        "quorum" if result["quorum"] else "no quorum",
+        ", ".join(
+            f"{proposal.author.name}: {proposal.yes}/{proposal.no}/{proposal.abstain}"
+            for proposal in seconded
+        ),
+        f"law: {winner.author.name}" if winner is not None else "no law",
+    )
     _log(
         game,
         "moot",
@@ -605,6 +672,7 @@ def _agent_propose(game: Game, thief):
             game.day,
             err,
         )
+        _logger.info("Day %d moot: %s proposes nothing", game.day, thief.name)
         return None
     if (
         not isinstance(answer, dict)
@@ -612,8 +680,11 @@ def _agent_propose(game: Game, thief):
         or not isinstance(answer.get("text"), str)
         or not answer["text"].strip()
     ):
+        _logger.info("Day %d moot: %s proposes nothing", game.day, thief.name)
         return None
-    return answer["text"].strip()
+    text = answer["text"].strip()
+    _logger.info("Day %d moot: %s proposes: %s", game.day, thief.name, _clip(text))
+    return text
 
 
 def _agent_second(game: Game, thief, proposals):
@@ -645,9 +716,11 @@ def _agent_second(game: Game, thief, proposals):
             game.day,
             err,
         )
+        _logger.info("Day %d moot: %s seconds nothing", game.day, thief.name)
         return []
     names = answer.get("second") if isinstance(answer, dict) else None
     if not isinstance(names, list):
+        _logger.info("Day %d moot: %s seconds nothing", game.day, thief.name)
         return []
     picked = []
     for name in names:
@@ -656,6 +729,15 @@ def _agent_second(game: Game, thief, proposals):
         proposal = next((p for p in proposals if p.author.name == name), None)
         if proposal is not None and proposal not in picked:
             picked.append(proposal)
+    if picked:
+        _logger.info(
+            "Day %d moot: %s seconds: %s",
+            game.day,
+            thief.name,
+            ", ".join(proposal.author.name for proposal in picked),
+        )
+    else:
+        _logger.info("Day %d moot: %s seconds nothing", game.day, thief.name)
     return picked
 
 
@@ -707,6 +789,21 @@ def _moot_speak(game: Game, thief, round_no: int, order: int) -> None:
     DebateMessage.objects.create(
         game=game, day=game.day, round=round_no, thief=thief, text=text, order=order
     )
+    if text:
+        _logger.info(
+            "Day %d moot debate round %d/3: %s: %s",
+            game.day,
+            round_no,
+            thief.name,
+            _clip(text),
+        )
+    else:
+        _logger.info(
+            "Day %d moot debate round %d/3: %s: passes",
+            game.day,
+            round_no,
+            thief.name,
+        )
 
 
 def _agent_ballot(game: Game, thief, floor):
@@ -719,6 +816,7 @@ def _agent_ballot(game: Game, thief, floor):
     floor_list = "\n".join(
         f"- {proposal.author.name}: {proposal.text}" for proposal in floor
     )
+    answer = None
     try:
         answer = llm.client.ask_json(
             system_prompt(thief),
@@ -739,15 +837,23 @@ def _agent_ballot(game: Game, thief, floor):
             game.day,
             err,
         )
-        return {}
-    votes = answer.get("votes") if isinstance(answer, dict) else None
-    if not isinstance(votes, dict):
-        return {}
-    return {
-        name: choice
-        for name, choice in votes.items()
-        if isinstance(name, str) and isinstance(choice, str)
+    raw = answer.get("votes") if isinstance(answer, dict) else None
+    votes = raw if isinstance(raw, dict) else {}
+    choices = {
+        proposal.author.name: (
+            votes.get(proposal.author.name)
+            if votes.get(proposal.author.name) in ("yes", "no", "abstain")
+            else "abstain"
+        )
+        for proposal in floor
     }
+    _logger.info(
+        "Day %d moot: %s ballots: %s",
+        game.day,
+        thief.name,
+        ", ".join(f"{name}: {choice}" for name, choice in choices.items()),
+    )
+    return choices
 
 
 _BEATS = {

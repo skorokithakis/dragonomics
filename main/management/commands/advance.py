@@ -1,9 +1,21 @@
+import logging
+import sys
+
 from django.core.management.base import BaseCommand, CommandError
 
 from main.beats import run_next_beat
 from main.models import Game, PHASES
 
 _PHASE_LABELS = dict(PHASES)
+
+# Agent-mode progress lines land on the beats logger at INFO. While this
+# command runs we attach a plain message-only handler to stdout so those
+# lines stream live on the console; the finally block always removes it.
+# One shared handler instance keeps addHandler idempotent on re-entry.
+_BEATS_LOGGER = logging.getLogger(run_next_beat.__module__)
+_PROGRESS_HANDLER = logging.StreamHandler(sys.stdout)
+_PROGRESS_HANDLER.setLevel(logging.INFO)
+_PROGRESS_HANDLER.setFormatter(logging.Formatter("%(message)s"))
 
 
 def _summarize(game: Game) -> str:
@@ -102,8 +114,11 @@ class Command(BaseCommand):
             game = Game.objects.filter(status="running").order_by("-pk").first()
             if game is None:
                 raise CommandError("No running game; create one with new_game first.")
+        _BEATS_LOGGER.addHandler(_PROGRESS_HANDLER)
         try:
             run_next_beat(game)
         except ValueError as error:
             raise CommandError(str(error)) from error
+        finally:
+            _BEATS_LOGGER.removeHandler(_PROGRESS_HANDLER)
         self.stdout.write(_summarize(game))
