@@ -64,6 +64,10 @@ class Thief(models.Model):
     )
     persona = models.TextField(blank=True, default="")
     diary = models.TextField(blank=True, default="")
+    goal = models.TextField(blank=True, default="")
+    goal_condition = models.JSONField(default=dict)
+    goal_payout = models.IntegerField(default=0)
+    goal_met_day = models.IntegerField(null=True, blank=True)
 
     def __str__(self):
         return self.name

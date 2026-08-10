@@ -1,4 +1,4 @@
-"""Static game content: the rules prose, example proposals, and personas.
+"""Static game content: the rules prose, example proposals, personas, and goals.
 
 Pure text: no Django models, no LLM calls. Every mechanics number in
 ``RULES`` is interpolated from ``main.engine`` constants so the prose can
@@ -167,7 +167,7 @@ EXAMPLE_PROPOSALS = [
     "No thief shall take more than 2 coins in any single night.",
 ]
 
-# Ten personas: name and a one-line character. No private goals yet.
+# Ten personas: name and a one-line character.
 PERSONAS = [
     (
         "Bram",
@@ -217,3 +217,113 @@ PERSONAS = [
         "never wrong in any way anyone can prove.",
     ),
 ]
+
+# One private goal per persona, keyed by the same names as PERSONAS. Each
+# goal has 'text' (fiction prose for the persona sheet), a JSON-able
+# 'condition', and a gold 'payout'. Condition shapes:
+# - {type: gold, amount: N, by_day: D} — met at the first dawn on or before
+#   day D where the thief holds >= N gold.
+# - {type: law} — met at the dawn a proposal authored by the thief is
+#   enacted as law.
+# - {type: hoard, amount: N, day: D} — met if the hoard holds >= N at the
+#   dawn of day D exactly.
+GOALS = {
+    "Bram": {
+        "text": (
+            "The man who taught you the trade left a debt-marker with your "
+            "name on it. His widow will forgive it - and pay you 15 gold - "
+            "if you can show 35 gold in hand at any dawn on or before day "
+            "20. Old debts, paid in full, always."
+        ),
+        "condition": {"type": "gold", "amount": 35, "by_day": 20},
+        "payout": 15,
+    },
+    "Sable": {
+        "text": (
+            "A patron in the low city pays for influence, not gold. Get a "
+            "proposal of yours passed at the Moot; at the dawn it becomes "
+            "law, her agent pays you 15 gold. Proof that you steer this "
+            "village is worth more to her than anything you could steal."
+        ),
+        "condition": {"type": "law"},
+        "payout": 15,
+    },
+    "Merrick": {
+        "text": (
+            "The Church of the Sleeping Flame has named the tenth dawn a "
+            "vigil. If the hoard holds at least 200 coins at dawn of day "
+            "10, the church pays you 20 gold for keeping the pile holy. "
+            "Guide the village to restraint, by sermon or by law."
+        ),
+        "condition": {"type": "hoard", "amount": 200, "day": 10},
+        "payout": 20,
+    },
+    "Aldo": {
+        "text": (
+            "You owe the Guild of Ledgers 40 gold, due by dawn of day 20. "
+            "Show 40 gold in hand at any dawn on or before day 20 and the "
+            "guild clears your name and pays a 15 gold commission. Fail, "
+            "and the ledger stays open forever."
+        ),
+        "condition": {"type": "gold", "amount": 40, "by_day": 20},
+        "payout": 15,
+    },
+    "Vex": {
+        "text": (
+            "The smith who forges parts for the great stick wants 25 gold "
+            "up front, ordered by day 12. Hold 25 gold at any dawn on or "
+            "before day 12 and your backer covers the order and pays you "
+            "10 gold besides."
+        ),
+        "condition": {"type": "gold", "amount": 25, "by_day": 12},
+        "payout": 10,
+    },
+    "Old Nan": {
+        "text": (
+            "A collector of village constitutions pays 15 gold the day a "
+            "law you authored is enacted. A hundred plans you watched "
+            "fail; let one lesson outlive you in the statute book."
+        ),
+        "condition": {"type": "law"},
+        "payout": 15,
+    },
+    "Joss": {
+        "text": (
+            "A ballad-writer in the next valley pays 10 gold for the story "
+            "of the day the village obeyed something you wrote. Get a "
+            "proposal of yours passed at the Moot and enacted at dawn. "
+            "Rich fades; famous does not."
+        ),
+        "condition": {"type": "law"},
+        "payout": 10,
+    },
+    "Perrin": {
+        "text": (
+            "Your marker with the bookmaker stands at 50 gold, and his "
+            "patience runs to day 25. Hold 50 gold at any dawn on or "
+            "before day 25 and he clears the marker and pays you 20 gold "
+            "for the nerve."
+        ),
+        "condition": {"type": "gold", "amount": 50, "by_day": 25},
+        "payout": 20,
+    },
+    "Kael": {
+        "text": (
+            "Your old night crew is owed back wages: 30 gold by mid-month. "
+            "Hold 30 gold at any dawn on or before day 15 and their agent "
+            "settles it and pays you 10 gold for keeping your name good."
+        ),
+        "condition": {"type": "gold", "amount": 30, "by_day": 15},
+        "payout": 10,
+    },
+    "Ivy": {
+        "text": (
+            "The omens are exact: on the fifteenth dawn, the smoke must "
+            "rise from a pile of at least 200 coins. If the hoard holds "
+            "200 at dawn of day 15, the circle that reads your signs pays "
+            "you 20 gold. If not, the signs go dark."
+        ),
+        "condition": {"type": "hoard", "amount": 200, "day": 15},
+        "payout": 20,
+    },
+}

@@ -4,9 +4,10 @@
 dispatching on ``game.phase``. All numbers come from ``main.engine``, and the
 engine's dice live in one module-level ``random.Random`` with no stored seed.
 
-Beats: dawn (publish scores and hoard; from day 26 roll the end-of-game die;
-day 40 always ends the run; in agent games yesterday's passed proposals
-become law), morning parley / moot / dusk parley (logged no-ops in policy
+Beats: dawn (pay private goals, publish scores and hoard; from day 26 roll
+the end-of-game die; day 40 always ends the run; in agent games yesterday's
+passed proposals become law), morning parley / moot / dusk parley (logged
+no-ops in policy
 games; in agent games the parley windows open and run private parleys and
 the moot runs proposals, seconds, the floor lottery, debate, secret
 ballots, and the public tally), implementor (no-op, logged; in agent games
@@ -100,6 +101,50 @@ def _log_final_ranking(game: Game, phase: str) -> None:
     )
 
 
+def _pay_goals(game: Game) -> None:
+    """Pay every unmet private goal this dawn fulfills.
+
+    Runs after law enactment and before the dawn report, so payouts land
+    before the report's score snapshot. Only thieves with a non-empty
+    ``goal_condition`` and no ``goal_met_day`` are evaluated (each goal pays
+    once). Condition shapes (see ``main.content.GOALS``): gold — the thief
+    holds at least ``amount`` at a dawn on or before ``by_day``; hoard —
+    the hoard holds at least ``amount`` at the dawn of ``day`` exactly;
+    law — any proposal authored by the thief has become law. Payout gold
+    enters from outside: ``game.hoard`` is untouched.
+    """
+    for thief in game.thieves.all():
+        if not thief.goal_condition or thief.goal_met_day is not None:
+            continue
+        condition = thief.goal_condition
+        kind = condition.get("type")
+        if kind == "gold":
+            met = game.day <= condition.get("by_day", 0) and thief.gold >= condition.get(
+                "amount", 0
+            )
+        elif kind == "hoard":
+            met = game.day == condition.get("day") and game.hoard >= condition.get(
+                "amount", 0
+            )
+        elif kind == "law":
+            met = Proposal.objects.filter(
+                game=game, author=thief, status="law"
+            ).exists()
+        else:
+            continue  # unknown condition shape: never met
+        if not met:
+            continue
+        thief.gold += thief.goal_payout
+        thief.goal_met_day = game.day
+        thief.save(update_fields=["gold", "goal_met_day"])
+        _log(
+            game,
+            "dawn",
+            "goal_payout",
+            {"thief": thief.name, "amount": thief.goal_payout},
+        )
+
+
 def _beat_dawn(game: Game) -> None:
     law = None
     if game.agents:
@@ -111,6 +156,7 @@ def _beat_dawn(game: Game) -> None:
             proposal.status = "law"
             proposal.save(update_fields=["status"])
             law = {"author": proposal.author.name, "text": proposal.text}
+    _pay_goals(game)
     _log(
         game,
         "dawn",

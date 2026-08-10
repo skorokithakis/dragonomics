@@ -35,6 +35,8 @@
             {% if event.payload.law %}
                 <p class="law">Enacted law: {{ event.payload.law.author }} — “{{ event.payload.law.text }}”</p>
             {% endif %}
+        {% elif event.type == "goal_payout" %}
+            <p>A hooded stranger paid {{ event.payload.thief }} {{ event.payload.amount }} gold.</p>
         {% elif event.type == "rescue_roll" %}
             <h3>Rescue roll</h3>
             <p>

@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand, CommandError
 
-from main.content import PERSONAS
+from main.content import GOALS, PERSONAS
 from main.models import Game, Thief
 
 TAKE_POLICY_RANGE = range(6)
@@ -33,7 +33,15 @@ class Command(BaseCommand):
                 raise CommandError("--policies cannot be combined with --agents.")
             game = Game.objects.create(agents=True)
             for name, persona in PERSONAS:
-                Thief.objects.create(game=game, name=name, persona=persona)
+                goal = GOALS[name]
+                Thief.objects.create(
+                    game=game,
+                    name=name,
+                    persona=persona,
+                    goal=goal["text"],
+                    goal_condition=goal["condition"],
+                    goal_payout=goal["payout"],
+                )
             self.stdout.write(
                 f"Created agent game {game.pk} with 10 thieves "
                 f"({', '.join(name for name, _ in PERSONAS)})"

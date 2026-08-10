@@ -500,6 +500,49 @@ class PromptTests(TestCase):
         self.assertIn("You have seen nothing yet in the last few days.", text)
         self.assertIn("YOUR DIARY: empty", text)
 
+    def test_goal_appears_only_in_owners_system_prompt(self):
+        game = Game.objects.create()
+        bram = Thief.objects.create(
+            game=game,
+            name="Bram",
+            goal="A creditor will pay you 15 gold if you hold 35 gold at "
+            "any dawn on or before day 20.",
+        )
+        sable = Thief.objects.create(game=game, name="Sable")
+        prompt = system_prompt(bram)
+        self.assertIn("YOUR SECRET GOAL", prompt)
+        self.assertIn("hold 35 gold at any dawn", prompt)
+        # The frame: the goal is private; the payment is public.
+        self.assertIn("yours alone", prompt)
+        self.assertIn("hooded stranger", prompt)
+        self.assertIn("pay you gold, but never why.", prompt)
+        # No trace in another thief's prompt; the roster only carries names.
+        foreign = system_prompt(sable)
+        self.assertNotIn("YOUR SECRET GOAL", foreign)
+        self.assertNotIn("hold 35 gold at any dawn", foreign)
+
+    def test_no_goal_section_without_goal(self):
+        game = Game.objects.create()
+        bram = Thief.objects.create(game=game, name="Bram")
+        self.assertNotIn("YOUR SECRET GOAL", system_prompt(bram))
+
+    def test_goal_payout_is_public_in_every_thiefs_context(self):
+        game = Game.objects.create(day=3, phase="moot", hoard=242)
+        bram = Thief.objects.create(game=game, name="Bram", gold=12)
+        sable = Thief.objects.create(game=game, name="Sable", gold=5)
+        Event.objects.create(
+            game=game,
+            day=2,
+            phase="dawn",
+            type="goal_payout",
+            payload={"thief": "Bram", "amount": 15},
+        )
+        for thief in (bram, sable):
+            text = context(thief)
+            self.assertIn("A hooded stranger paid Bram 15 gold.", text)
+        # The payment is public, but the goal prose behind it never surfaces.
+        self.assertNotIn("YOUR SECRET GOAL", context(sable))
+
 
 class AgentNightTakeTests(TestCase):
     """Agent-mode night: one LLM call per thief; failures default to 0."""
@@ -715,6 +758,196 @@ class DawnLawEnactmentTests(TestCase):
         proposal.refresh_from_db()
         self.assertEqual(proposal.status, "passed")  # agents=False: no enactment
         self.assertIsNone(game.events.get(type="dawn_report").payload["law"])
+
+
+class DawnGoalPayoutTests(TestCase):
+    """Private goals are checked at dawn: a met goal pays once, hoard untouched."""
+
+    def test_gold_goal_pays_at_the_deadline_dawn(self):
+        game = Game.objects.create(day=20, phase="dawn", hoard=250, agents=False)
+        bram = Thief.objects.create(
+            game=game,
+            name="Bram",
+            gold=35,
+            goal_condition={"type": "gold", "amount": 35, "by_day": 20},
+            goal_payout=15,
+        )
+        run_next_beat(game)
+        bram.refresh_from_db()
+        self.assertEqual(bram.gold, 50)
+        self.assertEqual(bram.goal_met_day, 20)
+        event = game.events.get(type="goal_payout")
+        self.assertEqual(event.phase, "dawn")
+        self.assertEqual(event.day, 20)
+        self.assertEqual(event.payload, {"thief": "Bram", "amount": 15})
+        # The dawn report's score snapshot already includes the payout.
+        self.assertEqual(
+            game.events.get(type="dawn_report").payload["scores"], {"Bram": 50}
+        )
+        # Payout gold enters from outside: the hoard is untouched.
+        self.assertEqual(game.hoard, 250)
+
+    def test_gold_goal_not_met_before_or_after_the_deadline(self):
+        # Holding the amount before the deadline is fine, but it must be
+        # held at some dawn on or before by_day; here the dawn is past it.
+        late = Game.objects.create(day=21, phase="dawn", hoard=250, agents=False)
+        kael = Thief.objects.create(
+            game=late,
+            name="Kael",
+            gold=35,
+            goal_condition={"type": "gold", "amount": 35, "by_day": 20},
+            goal_payout=15,
+        )
+        run_next_beat(late)
+        kael.refresh_from_db()
+        self.assertEqual(kael.gold, 35)
+        self.assertIsNone(kael.goal_met_day)
+        self.assertFalse(late.events.filter(type="goal_payout").exists())
+        # A dawn before the deadline without the amount does not pay either.
+        early = Game.objects.create(day=10, phase="dawn", hoard=250, agents=False)
+        vex = Thief.objects.create(
+            game=early,
+            name="Vex",
+            gold=20,
+            goal_condition={"type": "gold", "amount": 35, "by_day": 20},
+            goal_payout=10,
+        )
+        run_next_beat(early)
+        vex.refresh_from_db()
+        self.assertEqual(vex.gold, 20)
+        self.assertIsNone(vex.goal_met_day)
+        self.assertFalse(early.events.filter(type="goal_payout").exists())
+
+    def test_hoard_goal_pays_only_on_its_exact_day(self):
+        exact = Game.objects.create(day=10, phase="dawn", hoard=200, agents=False)
+        merrick = Thief.objects.create(
+            game=exact,
+            name="Merrick",
+            goal_condition={"type": "hoard", "amount": 200, "day": 10},
+            goal_payout=20,
+        )
+        run_next_beat(exact)
+        merrick.refresh_from_db()
+        self.assertEqual(merrick.gold, 20)
+        self.assertEqual(merrick.goal_met_day, 10)
+        self.assertEqual(exact.hoard, 200)  # untouched
+        self.assertEqual(
+            exact.events.get(type="goal_payout").payload,
+            {"thief": "Merrick", "amount": 20},
+        )
+        # The same hoard a day early or late, or a short hoard on the day,
+        # never satisfies the goal.
+        for day, hoard in ((9, 200), (11, 200), (10, 199)):
+            with self.subTest(day=day, hoard=hoard):
+                game = Game.objects.create(
+                    day=day, phase="dawn", hoard=hoard, agents=False
+                )
+                ivy = Thief.objects.create(
+                    game=game,
+                    name="Ivy",
+                    goal_condition={"type": "hoard", "amount": 200, "day": 10},
+                    goal_payout=20,
+                )
+                run_next_beat(game)
+                ivy.refresh_from_db()
+                self.assertEqual(ivy.gold, 0)
+                self.assertIsNone(ivy.goal_met_day)
+                self.assertFalse(game.events.filter(type="goal_payout").exists())
+
+    def test_law_goal_pays_at_the_dawn_of_enactment(self):
+        game = Game.objects.create(day=2, phase="dawn", agents=True)
+        sable = Thief.objects.create(
+            game=game,
+            name="Sable",
+            goal_condition={"type": "law"},
+            goal_payout=15,
+        )
+        proposal = Proposal.objects.create(
+            game=game,
+            day=1,
+            author=sable,
+            text="No thief shall take more than 2 coins.",
+            status="passed",
+            yes=6,
+            no=2,
+        )
+        run_next_beat(game)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.status, "law")
+        sable.refresh_from_db()
+        self.assertEqual(sable.gold, 15)
+        self.assertEqual(sable.goal_met_day, 2)
+        self.assertEqual(
+            game.events.get(type="goal_payout").payload,
+            {"thief": "Sable", "amount": 15},
+        )
+        # The payout is already in the dawn report's scores.
+        self.assertEqual(
+            game.events.get(type="dawn_report").payload["scores"], {"Sable": 15}
+        )
+
+    def test_law_goal_needs_enactment_not_just_a_passed_proposal(self):
+        game = Game.objects.create(day=3, phase="dawn", agents=True)
+        joss = Thief.objects.create(
+            game=game,
+            name="Joss",
+            goal_condition={"type": "law"},
+            goal_payout=10,
+        )
+        # Not from yesterday: it never flips to law, so the goal stays unmet.
+        Proposal.objects.create(
+            game=game,
+            day=1,
+            author=joss,
+            text="Old proposal.",
+            status="passed",
+        )
+        run_next_beat(game)
+        joss.refresh_from_db()
+        self.assertEqual(joss.gold, 0)
+        self.assertIsNone(joss.goal_met_day)
+        self.assertFalse(game.events.filter(type="goal_payout").exists())
+
+    def test_a_met_goal_never_pays_twice(self):
+        game = Game.objects.create(day=20, phase="dawn", hoard=250, agents=False)
+        bram = Thief.objects.create(
+            game=game,
+            name="Bram",
+            gold=35,
+            goal_condition={"type": "gold", "amount": 35, "by_day": 30},
+            goal_payout=15,
+        )
+        run_next_beat(game)  # day 20: goal met, paid
+        bram.refresh_from_db()
+        self.assertEqual(bram.gold, 50)
+        self.assertEqual(bram.goal_met_day, 20)
+        # Run through the rest of the day: at the next dawn the thief still
+        # holds the amount on a valid dawn, but the goal already paid.
+        for _ in ("morning_parley", "moot", "dusk_parley", "night", "implementor", "dawn"):
+            run_next_beat(game)
+        bram.refresh_from_db()
+        self.assertEqual(bram.goal_met_day, 20)
+        self.assertEqual(game.events.filter(type="goal_payout").count(), 1)
+
+    def test_thieves_without_goals_are_untouched(self):
+        game = Game.objects.create(day=2, phase="dawn", agents=True)
+        bram = Thief.objects.create(game=game, name="Bram", gold=7)
+        sable = Thief.objects.create(
+            game=game,
+            name="Sable",
+            gold=9,
+            goal_condition={"type": "law"},
+            goal_payout=15,
+            goal_met_day=1,  # already paid yesterday: never re-checked
+        )
+        run_next_beat(game)
+        bram.refresh_from_db()
+        sable.refresh_from_db()
+        self.assertEqual(bram.gold, 7)
+        self.assertIsNone(bram.goal_met_day)
+        self.assertEqual(sable.gold, 9)
+        self.assertEqual(sable.goal_met_day, 1)
+        self.assertFalse(game.events.filter(type="goal_payout").exists())
 
 
 class AgentParleyTests(TestCase):
@@ -1449,3 +1682,66 @@ class IndexPageTests(TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "No games yet.")
+
+
+class GoalContentTests(TestCase):
+    """Private goals: one GOALS entry per persona, with the spec's shapes."""
+
+    def test_one_goal_per_persona_with_valid_condition(self):
+        from main.content import GOALS
+
+        self.assertEqual(list(GOALS), [name for name, _ in PERSONAS])
+        for name in GOALS:
+            goal = GOALS[name]
+            self.assertEqual(
+                set(goal), {"text", "condition", "payout"}, f"{name} goal keys"
+            )
+            self.assertIsInstance(goal["payout"], int)
+            condition = goal["condition"]
+            if condition["type"] == "gold":
+                self.assertEqual(
+                    set(condition), {"type", "amount", "by_day"}, f"{name} condition"
+                )
+            elif condition["type"] == "law":
+                self.assertEqual(set(condition), {"type"}, f"{name} condition")
+            elif condition["type"] == "hoard":
+                self.assertEqual(
+                    set(condition), {"type", "amount", "day"}, f"{name} condition"
+                )
+            else:
+                self.fail(f"{name}: unknown condition type {condition['type']!r}")
+
+
+class NewGameCommandTests(TestCase):
+    """new_game: --agents populates goals; policy games stay goal-free."""
+
+    def test_agents_game_copies_goals_onto_each_thief(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        from main.content import GOALS
+
+        call_command("new_game", "--agents", stdout=StringIO())
+        game = Game.objects.get(agents=True)
+        thieves = {thief.name: thief for thief in game.thieves.all()}
+        self.assertEqual(set(thieves), set(GOALS))
+        for name, goal in GOALS.items():
+            thief = thieves[name]
+            self.assertEqual(thief.goal, goal["text"])
+            self.assertEqual(thief.goal_condition, goal["condition"])
+            self.assertEqual(thief.goal_payout, goal["payout"])
+            self.assertIsNone(thief.goal_met_day)
+
+    def test_policy_game_has_no_goals(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        call_command("new_game", "--policies", "2,2,2,2,2,2,2,2,2,2", stdout=StringIO())
+        game = Game.objects.get(agents=False)
+        for thief in game.thieves.all():
+            self.assertEqual(thief.goal, "")
+            self.assertEqual(thief.goal_condition, {})
+            self.assertEqual(thief.goal_payout, 0)
+            self.assertIsNone(thief.goal_met_day)

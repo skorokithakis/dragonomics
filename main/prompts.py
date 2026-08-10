@@ -38,11 +38,22 @@ def _roster():
 
 def system_prompt(thief):
     """The static system prompt for ``thief``: rules, identity, roster,
-    example proposals."""
+    example proposals, and - for thieves that have one - their private goal."""
     persona = thief.persona.strip() or _persona_for(thief.name)
     identity = f"You are {thief.name}."
     if persona:
         identity = f"You are {thief.name}. {persona}"
+    goal = ""
+    if thief.goal.strip():
+        goal = f"""
+YOUR SECRET GOAL
+
+{thief.goal.strip()}
+
+This goal is yours alone: nobody else in the village knows it. If you meet
+it, the payment itself is public - the village will see a hooded stranger
+pay you gold, but never why.
+"""
     examples = "\n".join(
         f"{index}. {text}" for index, text in enumerate(EXAMPLE_PROPOSALS, start=1)
     )
@@ -51,7 +62,7 @@ def system_prompt(thief):
 YOU
 
 {identity}
-
+{goal}
 THE VILLAGE - ALL TEN THIEVES
 
 {_roster()}
@@ -71,7 +82,8 @@ def context(thief):
 
     Returns a plain string; beats append their specific question to it.
     Visibility follows the information physics: the dawn report (hoard and
-    enacted law, but never individual scores), proposals with their public
+    enacted law, but never individual scores), goal payouts (the stranger's
+    payment, never the goal behind it), proposals with their public
     tallies, and the public debate are shown to everyone; the thief's own
     parleys, ballots, takes, and diary are shown only to the thief. Another
     thief's takes, another thief's individual ballots, and parleys the thief
@@ -102,6 +114,13 @@ def context(thief):
             if law:
                 line += f" Law now in force: {law['author']}: {law['text']}."
             day_lines.append(line)
+        for event in Event.objects.filter(game=game, day=day, type="goal_payout"):
+            # Goal payouts are public: everyone sees the stranger's payment,
+            # nobody ever sees the goal behind it.
+            day_lines.append(
+                f"A hooded stranger paid {event.payload.get('thief')} "
+                f"{event.payload.get('amount')} gold."
+            )
         proposals = list(Proposal.objects.filter(game=game, day=day).order_by("pk"))
         if proposals:
             day_lines.append("Moot - proposals:")
