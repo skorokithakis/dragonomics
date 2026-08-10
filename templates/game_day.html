@@ -72,7 +72,7 @@
     {% endif %}
     {% for proposal in proposals %}
         <article class="proposal">
-            <h3>{{ proposal.author.name }} · {{ proposal.get_status_display }}</h3>
+            <h3>{{ proposal.author.name }} · {{ proposal.display_status }}</h3>
             <p class="proposal-text">{{ proposal.text }}</p>
             {% if proposal.seconded_by.all %}
                 <p>Seconded by: {{ proposal.seconded_by.all|join:", " }}</p>

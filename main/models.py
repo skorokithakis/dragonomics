@@ -88,7 +88,9 @@ class Event(models.Model):
 class Proposal(models.Model):
     game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="proposals")
     day = models.IntegerField()
-    author = models.ForeignKey(Thief, on_delete=models.CASCADE, related_name="proposals")
+    author = models.ForeignKey(
+        Thief, on_delete=models.CASCADE, related_name="proposals"
+    )
     text = models.TextField()
     status = models.CharField(
         max_length=32, choices=PROPOSAL_STATUSES, default="submitted"
@@ -96,14 +98,30 @@ class Proposal(models.Model):
     yes = models.IntegerField(default=0)
     no = models.IntegerField(default=0)
     abstain = models.IntegerField(default=0)
-    seconded_by = models.ManyToManyField(Thief, related_name="seconded_proposals", blank=True)
+    seconded_by = models.ManyToManyField(
+        Thief, related_name="seconded_proposals", blank=True
+    )
 
     def __str__(self):
         return f"{self.author}'s proposal on day {self.day} ({self.status})"
 
+    @property
+    def display_status(self):
+        """Audience-facing status label.
+
+        A proposal that never left ``submitted`` is dead, not pending: it
+        either found no second ("Not seconded") or was seconded but lost
+        the three-slot floor lottery ("Not picked").
+        """
+        if self.status == "submitted":
+            return "Not picked" if self.seconded_by.exists() else "Not seconded"
+        return self.get_status_display()
+
 
 class Ballot(models.Model):
-    proposal = models.ForeignKey(Proposal, on_delete=models.CASCADE, related_name="ballots")
+    proposal = models.ForeignKey(
+        Proposal, on_delete=models.CASCADE, related_name="ballots"
+    )
     thief = models.ForeignKey(Thief, on_delete=models.CASCADE, related_name="ballots")
     choice = models.CharField(max_length=32, choices=VOTES)
 
@@ -112,10 +130,14 @@ class Ballot(models.Model):
 
 
 class DebateMessage(models.Model):
-    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="debate_messages")
+    game = models.ForeignKey(
+        Game, on_delete=models.CASCADE, related_name="debate_messages"
+    )
     day = models.IntegerField()
     round = models.IntegerField()
-    thief = models.ForeignKey(Thief, on_delete=models.CASCADE, related_name="debate_messages")
+    thief = models.ForeignKey(
+        Thief, on_delete=models.CASCADE, related_name="debate_messages"
+    )
     text = models.TextField(blank=True, default="")
     order = models.IntegerField()
 
@@ -127,7 +149,9 @@ class Parley(models.Model):
     game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="parleys")
     day = models.IntegerField()
     window = models.CharField(max_length=32, choices=WINDOWS)
-    opener = models.ForeignKey(Thief, on_delete=models.CASCADE, related_name="opened_parleys")
+    opener = models.ForeignKey(
+        Thief, on_delete=models.CASCADE, related_name="opened_parleys"
+    )
     participants = models.ManyToManyField(Thief, related_name="parleys", blank=True)
 
     def __str__(self):
@@ -135,9 +159,13 @@ class Parley(models.Model):
 
 
 class ParleyMessage(models.Model):
-    parley = models.ForeignKey(Parley, on_delete=models.CASCADE, related_name="messages")
+    parley = models.ForeignKey(
+        Parley, on_delete=models.CASCADE, related_name="messages"
+    )
     round = models.IntegerField()
-    thief = models.ForeignKey(Thief, on_delete=models.CASCADE, related_name="parley_messages")
+    thief = models.ForeignKey(
+        Thief, on_delete=models.CASCADE, related_name="parley_messages"
+    )
     text = models.TextField(blank=True, default="")
     order = models.IntegerField()
 
