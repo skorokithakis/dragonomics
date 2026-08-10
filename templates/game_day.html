@@ -87,15 +87,13 @@
     {% endfor %}
     {% if debate %}
         <h3>Debate</h3>
-        <ul class="transcript">
+        <div class="transcript">
             {% for message in debate %}
-                <li>
-                    <span class="round">r{{ message.round }}</span>
-                    <strong>{{ message.thief.name }}</strong>:
-                    {% if message.text %}{{ message.text }}{% else %}<span class="pass">(pass)</span>{% endif %}
-                </li>
+                {% ifchanged message.round %}{% if not forloop.first %}<hr>{% endif %}{% endifchanged %}
+                <p>— <strong>{{ message.thief.name }}</strong>:
+                    {% if message.text %}{{ message.text }}{% else %}<span class="pass">(pass)</span>{% endif %}</p>
             {% endfor %}
-        </ul>
+        </div>
     {% endif %}
     {% if tally_event %}
         <p class="tally-note">
